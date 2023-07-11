@@ -62,11 +62,12 @@ def detection_video_stream(camera_urls):
             frame = camera.read()
             
             if frame is not None:
-
-                box_list = detect_face(frame)
-                box_list, labels = recognize_face(frame, box_list)
-                frame = draw_boundary_boxes(frame, box_list, labels)
-                cv2.imshow(f"Camera {i+1}", frame)
+                # resize frame to match the input size of the model
+                resized_frame = cv2.resize(frame, (640,480), interpolation= cv2.INTER_LINEAR)
+                box_list = detect_face(resized_frame)
+                box_list, labels = recognize_face(resized_frame, box_list)
+                frame = draw_boundary_boxes(resized_frame, box_list, labels)
+                cv2.imshow(f"Camera {i+1}", resized_frame)
             else:
                 print(f"Camera {cameras.index(camera)+1} disconnected")
                 camera.stop()

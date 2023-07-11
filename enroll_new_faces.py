@@ -4,7 +4,7 @@ import cv2
 import os
 import time
 
-camera_url = "/dev/video0"
+camera_url = "rtsp://192.168.0.100:8080/h264_pcm.sdp"
 
 parser = face.parser()
 args = parser.parse_args()
@@ -69,15 +69,16 @@ def capture_face_images(camera_url, person_name, output_dir):
         ret, frame = cap.read()
         frame_count += 1
         # Perform face detection on the frame
-        result = face_detector.face_detection(images=[frame])
+        resized_frame = cv2.resize(frame, (640,480), interpolation= cv2.INTER_LINEAR)
+        result = face_detector.face_detection(images=[resized_frame])
         box_list = result[0]['data']
-        img = draw_bounding_boxes(frame, box_list)
+        img = draw_bounding_boxes(resized_frame, box_list)
         cv2.imshow(f"Camera", img)
         # Crop and save the detected faces
         if frame_count % 4 == 0 and box_list:
             filename = '{}_{}.jpeg'.format(person_name, cnt)
             filepath = os.path.join(output_dir, filename)
-            crop_and_save_face(frame, filepath, box_list)
+            crop_and_save_face(resized_frame, filepath, box_list)
             write_to_file(filepath, person_name)
             cnt += 1
             
