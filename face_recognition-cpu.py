@@ -46,7 +46,6 @@ def draw_boundary_boxes(image, box_list, labels):
         # Put the label text near the box
         label = label+str(score)
         cv2.putText(image, label, (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-    return image
 
 def detection_video_stream(camera_urls):
     # Create VideoStream instances for each camera
@@ -66,7 +65,7 @@ def detection_video_stream(camera_urls):
                 resized_frame = cv2.resize(frame, (640,480), interpolation= cv2.INTER_LINEAR)
                 box_list = detect_face(resized_frame)
                 box_list, labels = recognize_face(resized_frame, box_list)
-                frame = draw_boundary_boxes(resized_frame, box_list, labels)
+                draw_boundary_boxes(resized_frame, box_list, labels)
                 cv2.imshow(f"Camera {i+1}", resized_frame)
             else:
                 print(f"Camera {cameras.index(camera)+1} disconnected")
