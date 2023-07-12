@@ -117,11 +117,28 @@ akash@akash:~$ cat camera_urls.json
 You have now completed the setup process for face recognition using PaddlePaddle. Follow the next steps specific to your application to continue. Feel free to refer to the provided links for further documentation on each component.
 
 ## Usage 
+
+Before proceeding, make sure you have activated the Python virtual environment you created earlier. Run the following command:
+
+```bash
+source myenv/bin/activate    # Replace `myenv` with your virtual environment name
+```
+
 **First you will need to introduce the people to the model**
+
 Run the `enroll_new_faces.py` script to enroll new people's faces.
+
    - Provide the camera link in the `camera_url` variable in the script.
    - Enter the person's name when prompted.
    - The script will capture face images for that person and save them in the dataset folder.
-   - It will also perform labeling for the captured faces.
+   - The face image capturing process will run for 10 seconds to allow the person to rotate their face and provide different angles for more accurate predictions.
+   - The captured images will be used for identification purposes.
    - At the end, face embeddings will be generated and saved in the `index.bin` file.
-   - Later these face embeddings will be used to measure cosine similarity for face recognition
+   - Later these face embeddings will be used to measure cosine similarity for face recognition process.
+
+Run the script using the following command:
+```powershell
+
+akash@akash:~$ python enroll_new_faces.py
+
+```
