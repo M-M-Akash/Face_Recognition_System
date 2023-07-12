@@ -1,4 +1,36 @@
 # Real Time Multiple Cameras Face Recognition System 
+
+## Development Pipeline
+
+The development pipeline for the face recognition system consists of several key steps, including model selection, data preprocessing, training, and deployment. The following is an overview of the pipeline:
+
+1. **Model Selection:**
+   - Initially, the system utilized the `insight-face-paddle` library developed by PaddlePaddle for face recognition.
+   - However, due to computational limitations on a CPU-based system, it was necessary to optimize the face detection model.
+
+2. **Face Detection Model Optimization:**
+   - The original face detection model, BlazeFace, was computationally expensive for continuous frame processing.
+   - As an alternative, the PyramidBox model was chosen as it demonstrated robustness against interferences and was optimized for mobile devices.
+   - The lightweight version of the PyramidBox model was preferred to ensure efficient operation on embedded systems and mobile devices.
+
+3. **Integration of Face Detection and Recognition:**
+   - The face detection model was integrated with the existing face recognition system from `insight-face-paddle`.
+   - When processing frames from a video stream, the face detection model detects faces and extracts face crop images.
+   - These face crop images are then passed through the face recognition model, MobileFace, to generate face embeddings.
+
+4. **Similarity Measurement:**
+   - The face embeddings obtained from the MobileFace face recognition model are used to compute the cosine similarity between the camera feed faces and provided image faces.
+   - This similarity measurement helps determine the degree of resemblance between faces, enabling face recognition and identification.
+
+5. **Multithreading for Model Inference:**
+   - To fully utilize available system resources, multithreading techniques were employed to handle the model inferencing operation.
+   - Multithreading ensures that both face detection and face recognition models can make predictions concurrently, optimizing system performance.
+
+6. **GPU Support:**
+   - Additionally, a script for GPU support was developed, enabling the system to leverage GPU acceleration if available.
+   - The GPU support script enhances the overall processing speed and allows for more efficient utilization of computational resources.
+
+
 # Setup Process
 
 This guide outlines the steps to set up the required Python environment and install the necessary packages for face recognition using PaddlePaddle. Follow the instructions below to get started:
