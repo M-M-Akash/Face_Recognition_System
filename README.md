@@ -20,7 +20,7 @@ Next, we need to install the PaddlePaddle framework. We'll be using version 2.4.
 python -m pip install paddlepaddle==2.4.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 If you do have the gpu support you need to install the gpu version. You can find the command here selecting your cuda version
- [here](https://www.paddlepaddle.org.cn/). .
+ [here](https://www.paddlepaddle.org.cn/).
 
 ## 3. Install Wheel Package
 
@@ -32,15 +32,12 @@ pip install wheel
 
 ## 4. Install InsightFacePaddle
 
-We will be using the InsightFacePaddle package for face recognition. Clone this repository:
+We will be using the InsightFacePaddle package for face recognition. Build the wheel package from this repository insight-face-paddle directory.
+
+Install it using the following commands:
 
 ```bash
 cd insight-face-paddle
-```
-
-Build the wheel package and install it using the following commands:
-
-```bash
 python setup.py bdist_wheel
 pip install dist/*
 ```
