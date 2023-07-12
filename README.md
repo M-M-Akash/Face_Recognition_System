@@ -1,4 +1,4 @@
-# Face_Recognition_System
+# Real Time Multiple Cameras Face Recognition System 
 # Setup Process
 
 This guide outlines the steps to set up the required Python environment and install the necessary packages for face recognition using PaddlePaddle. Follow the instructions below to get started:
@@ -19,7 +19,8 @@ Next, we need to install the PaddlePaddle framework. We'll be using version 2.4.
 ```bash
 python -m pip install paddlepaddle==2.4.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
-If you do have the gpu support you need to install the gpu version. You can find the command here selecting your cuda version (https://www.paddlepaddle.org.cn/)
+If you do have the gpu support you need to install the gpu version. You can find the command here selecting your cuda version.
+ [paddle paddle ](https://www.paddlepaddle.org.cn/). 
 
 ## 3. Install Wheel Package
 
