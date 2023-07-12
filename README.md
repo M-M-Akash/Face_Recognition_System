@@ -61,14 +61,10 @@ paddlehub.server_check()
 
 ## 6. Install Face Detection Module
 
-For face detection, we'll use the PyramidBox Lite Server module from PaddleHub. Install it using the following command:
+For face detection, we'll use the PyramidBox Lite Mobile module from PaddleHub. Install it using the following command:
 
 ```bash
 hub install pyramidbox_lite_mobile
 ```
-
-This will create a `.paddlehub` directory in your home folder and store the module there.
-
----
 
 You have now completed the setup process for face recognition using PaddlePaddle. Follow the next steps specific to your application to continue. Feel free to refer to the provided links for further documentation on each component.
