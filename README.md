@@ -4,29 +4,36 @@
 
 The development pipeline for the face recognition system consists of several key steps, including model selection, data preprocessing, training, and deployment. The following is an overview of the pipeline:
 
-1. **Model Selection:**
+1. **Capturing Video Frames from Multiple Cameras using RTSP Protocol:**
+   - Efficient capture of video frames from multiple cameras is crucial for real-time face recognition.
+   - The system implements the RTSP protocol to access camera streams, which provides efficient video transmission over IP networks.
+   - Threading techniques are employed to capture frames from multiple cameras simultaneously, improving performance by alleviating heavy I/O operations to separate threads.
+   - By using threading, frames can be continuously read without impacting the performance of the main program.
+
+
+2. **Model Selection:**
    - Initially, the system utilized the `insight-face-paddle` library developed by PaddlePaddle for face recognition.
    - However, due to computational limitations on a CPU-based system, it was necessary to optimize the face detection model.
 
-2. **Face Detection Model Optimization:**
+3. **Face Detection Model Optimization:**
    - The original face detection model, BlazeFace, was computationally expensive for continuous frame processing.
    - As an alternative, the PyramidBox model was chosen as it demonstrated robustness against interferences and was optimized for mobile devices.
    - The lightweight version of the PyramidBox model was preferred to ensure efficient operation on embedded systems and mobile devices.
 
-3. **Integration of Face Detection and Recognition:**
+4. **Integration of Face Detection and Recognition:**
    - The face detection model was integrated with the existing face recognition system from `insight-face-paddle`.
    - When processing frames from a video stream, the face detection model detects faces and extracts face crop images.
    - These face crop images are then passed through the face recognition model, MobileFace, to generate face embeddings.
 
-4. **Similarity Measurement:**
+5. **Similarity Measurement:**
    - The face embeddings obtained from the MobileFace face recognition model are used to compute the cosine similarity between the camera feed faces and provided image faces.
    - This similarity measurement helps determine the degree of resemblance between faces, enabling face recognition and identification.
 
-5. **Multithreading for Model Inference:**
+6. **Multithreading for Model Inference:**
    - To fully utilize available system resources, multithreading techniques were employed to handle the model inferencing operation.
    - Multithreading ensures that both face detection and face recognition models can make predictions concurrently, optimizing system performance.
 
-6. **GPU Support:**
+7. **GPU Support:**
    - Additionally, a script for GPU support was developed, enabling the system to leverage GPU acceleration if available.
    - The GPU support script enhances the overall processing speed and allows for more efficient utilization of computational resources.
 
@@ -99,4 +106,22 @@ For face detection, we'll use the PyramidBox Lite Mobile module from PaddleHub. 
 hub install pyramidbox_lite_mobile
 ```
 
+**You will also need to provide rtsp links for the cameras.**
+In the file `camera_urls.json` you need to paste the rtsp links in a list.
+```powershell
+
+akash@akash:~$ cat camera_urls.json
+["rtsp://192.168.0.100:8080/h264_pcm.sdp","rtsp://192.168.0.103:8080/h264_pcm.sdp"]
+
+```
 You have now completed the setup process for face recognition using PaddlePaddle. Follow the next steps specific to your application to continue. Feel free to refer to the provided links for further documentation on each component.
+
+## Usage 
+**First you will need to introduce the people to the model**
+Run the `enroll_new_faces.py` script to enroll new people's faces.
+   - Provide the camera link in the `camera_url` variable in the script.
+   - Enter the person's name when prompted.
+   - The script will capture face images for that person and save them in the dataset folder.
+   - It will also perform labeling for the captured faces.
+   - At the end, face embeddings will be generated and saved in the `index.bin` file.
+   - Later these face embeddings will be used to measure cosine similarity for face recognition
