@@ -62,7 +62,7 @@ Next, we need to install the PaddlePaddle framework. We'll be using version 2.4.
 python -m pip install paddlepaddle==2.4.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 If you do have the gpu support you need to install the gpu version. You can find the command here selecting your cuda version
- [here](https://www.paddlepaddle.org.cn/).
+ [here](https://www.paddlepaddle.org.cn/install/quick?docurl=/documentation/docs/zh/install/pip/linux-pip.html).
 
 ## 3. Install Wheel Package
 
@@ -89,7 +89,7 @@ pip install dist/*
 ## 5. Install PaddlePaddle Hub
 
 PaddlePaddle Hub is a powerful toolkit for pretrained AI models based on paddle paddle framework. Install it using the following command:
-
+[Documentation](https://paddlehub.readthedocs.io/en/release-v2.1/get_start/installation.html).
 ```bash
 pip install paddlehub==2.1.0
 ```
@@ -104,7 +104,10 @@ paddlehub.server_check()
 
 ## 6. Install Face Detection Module
 
-For face detection, we'll use the PyramidBox Lite Mobile module from PaddleHub. Install it using the following command:
+For face detection, we'll use the PyramidBox Lite Mobile module from PaddleHub. PyramidBox is a one-stage face detector based on SSD. 
+This model has solid robustness against interferences such as light and scale variation. This module is optimized for mobile device, based on PyramidBox, trained on WIDER FACE Dataset and Baidu Face Dataset.
+[Documentation](https://github.com/PaddlePaddle/PaddleHub/blob/develop/modules/image/face_detection/pyramidbox_lite_mobile/README_en.md).
+Install it using the following command:
 
 ```bash
 hub install pyramidbox_lite_mobile
@@ -115,14 +118,6 @@ You have now completed the setup process for face recognition using PaddlePaddle
 
 ## Usage 
 
-**You will need to provide rtsp links for the cameras which will be streaming.**
-In the file `camera_urls.json` you need to paste the rtsp links in a list.
-```powershell
-
-akash@akash:~$ cat camera_urls.json
-["rtsp://192.168.0.100:8080/h264_pcm.sdp","rtsp://192.168.0.103:8080/h264_pcm.sdp"]
-
-```
 
 Before proceeding, make sure you have activated the Python virtual environment you created earlier. Run the following command:
 
@@ -136,8 +131,8 @@ Run the `enroll_new_faces.py` script to enroll new people's faces.
 
    - Provide the camera link in the `camera_url` variable in the script.
    - Enter the person's name when prompted.
-   - The script will capture face images for that person and save them in the dataset folder.
    - The face image capturing process will run for 10 seconds to allow the person to rotate their face and provide different angles for more accurate predictions.
+   - The script will capture face images for that person and save them in the dataset folder.
    - The captured images will be used for identification purposes.
    - At the end, face embeddings will be generated and saved in the `index.bin` file.
    - Later these face embeddings will be used to measure cosine similarity for face recognition process.
@@ -145,6 +140,16 @@ Run the `enroll_new_faces.py` script to enroll new people's faces.
 Run the script using the following command:
 ```powershell
 
-akash@akash:~$ python enroll_new_faces.py
+(myenv)akash@akash:~$ python enroll_new_faces.py
 
 ```
+
+**You will need to provide rtsp links for the cameras which will be streaming.**
+In the file `camera_urls.json` you need to paste the rtsp links in a list.
+```powershell
+
+akash@akash:~$ cat camera_urls.json
+["rtsp://192.168.0.100:8080/h264_pcm.sdp","rtsp://192.168.0.103:8080/h264_pcm.sdp"]
+
+```
+
