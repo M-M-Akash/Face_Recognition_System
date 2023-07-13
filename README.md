@@ -1,5 +1,8 @@
 # Real Time Multiple Cameras Face Recognition System 
 This project aims to build a real-time face recognition system that can capture video streams from multiple cameras using RTSP protocol, analyze the video frames to detect faces, create bounding boxes around those faces and labeling thoses boxes with the person names.
+
+https://github.com/Akash-Rayhan/Face_Recognition_System/assets/40039916/d36b2665-7bca-4934-b10a-f4ae40ca1224
+
 ## Development Pipeline
 
 The development pipeline for the face recognition system consists of several key steps, including model selection, data preprocessing, training, and deployment. The following is an overview of the pipeline:
