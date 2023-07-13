@@ -79,6 +79,8 @@ pip install wheel
 
 We will be using the InsightFacePaddle package for face recognition. Build the wheel package from this repository insight-face-paddle directory.
 
+[Documentation](https://github.com/littletomatodonkey/insight-face-paddle)
+
 Install it using the following commands:
 
 ```bash
