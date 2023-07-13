@@ -1,6 +1,9 @@
 # Real Time Multiple Cameras Face Recognition System 
 This project aims to build a real-time face recognition system that can capture video streams from multiple cameras using RTSP protocol, analyze the video frames to detect faces, create bounding boxes around those faces and labeling thoses boxes with the person names.
 
+Demonstration Environment:
+- CPU: Intel i3 11th gen @ 3.00GHz 2 cores 4 threads
+
 https://github.com/Akash-Rayhan/Face_Recognition_System/assets/40039916/d36b2665-7bca-4934-b10a-f4ae40ca1224
 
 ## Development Pipeline
@@ -89,7 +92,8 @@ pip install dist/*
 ## 5. Install PaddlePaddle Hub
 
 PaddlePaddle Hub is a powerful toolkit for pretrained AI models based on paddle paddle framework. Install it using the following command:
-[Documentation](https://paddlehub.readthedocs.io/en/release-v2.1/get_start/installation.html).
+[Documentation](https://paddlehub.readthedocs.io/en/release-v2.1/get_start/installation.html)
+
 ```bash
 pip install paddlehub==2.1.0
 ```
@@ -106,7 +110,8 @@ paddlehub.server_check()
 
 For face detection, we'll use the PyramidBox Lite Mobile module from PaddleHub. PyramidBox is a one-stage face detector based on SSD. 
 This model has solid robustness against interferences such as light and scale variation. This module is optimized for mobile device, based on PyramidBox, trained on WIDER FACE Dataset and Baidu Face Dataset.
-[Documentation](https://github.com/PaddlePaddle/PaddleHub/blob/develop/modules/image/face_detection/pyramidbox_lite_mobile/README_en.md).
+[Documentation](https://github.com/PaddlePaddle/PaddleHub/blob/develop/modules/image/face_detection/pyramidbox_lite_mobile/README_en.md)
+
 Install it using the following command:
 
 ```bash
@@ -144,6 +149,8 @@ Run the script using the following command:
 
 ```
 
+### Now to run the face recognition system camera streaming
+
 **You will need to provide rtsp links for the cameras which will be streaming.**
 In the file `camera_urls.json` you need to paste the rtsp links in a list.
 ```powershell
@@ -152,4 +159,11 @@ akash@akash:~$ cat camera_urls.json
 ["rtsp://192.168.0.100:8080/h264_pcm.sdp","rtsp://192.168.0.103:8080/h264_pcm.sdp"]
 
 ```
+If you want to use the cpu environment you can specify the no. of threads the model will be using during inference time in the script `args.cpu_threads` changing this variable value.
 
+Run the cpu script using the following command:
+```powershell
+
+(myenv)akash@akash:~$ python face_recognition-cpu.py
+
+```
