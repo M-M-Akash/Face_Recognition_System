@@ -1,5 +1,5 @@
 # Real Time Multiple Cameras Face Recognition System 
-
+This project aims to build a real-time face recognition system that can capture video streams from multiple cameras using RTSP protocol, analyze the video frames to detect faces, create bounding boxes around those faces and labeling thoses boxes with the person names.
 ## Development Pipeline
 
 The development pipeline for the face recognition system consists of several key steps, including model selection, data preprocessing, training, and deployment. The following is an overview of the pipeline:
@@ -76,6 +76,7 @@ We will be using the InsightFacePaddle package for face recognition. Build the w
 Install it using the following commands:
 
 ```bash
+git clone <this repository>
 cd insight-face-paddle
 python setup.py bdist_wheel
 pip install dist/*
@@ -106,7 +107,12 @@ For face detection, we'll use the PyramidBox Lite Mobile module from PaddleHub. 
 hub install pyramidbox_lite_mobile
 ```
 
-**You will also need to provide rtsp links for the cameras.**
+
+You have now completed the setup process for face recognition using PaddlePaddle. Follow the next steps specific to your application to continue. Feel free to refer to the provided links for further documentation on each component.
+
+## Usage 
+
+**You will need to provide rtsp links for the cameras which will be streaming.**
 In the file `camera_urls.json` you need to paste the rtsp links in a list.
 ```powershell
 
@@ -114,9 +120,6 @@ akash@akash:~$ cat camera_urls.json
 ["rtsp://192.168.0.100:8080/h264_pcm.sdp","rtsp://192.168.0.103:8080/h264_pcm.sdp"]
 
 ```
-You have now completed the setup process for face recognition using PaddlePaddle. Follow the next steps specific to your application to continue. Feel free to refer to the provided links for further documentation on each component.
-
-## Usage 
 
 Before proceeding, make sure you have activated the Python virtual environment you created earlier. Run the following command:
 
