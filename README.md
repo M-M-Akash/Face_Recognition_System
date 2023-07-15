@@ -167,3 +167,10 @@ Run the cpu script using the following command:
 (myenv)akash@akash:~$ python face_recognition-cpu.py
 
 ```
+Also if you have gpu support you can run the script for gpu version
+
+```powershell
+
+(myenv)akash@akash:~$ python face_recognition-gpu.py
+
+```
