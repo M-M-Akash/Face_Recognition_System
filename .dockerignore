@@ -1,0 +1,13 @@
+.git
+.venv
+venv
+myenv
+__pycache__
+*.pyc
+Dataset/
+.DS_Store
+.idea
+.vscode
+*.md
+Dockerfile
+docker-compose.yml

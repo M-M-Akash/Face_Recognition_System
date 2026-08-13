@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Face Recognition</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #181b22; --line: #2a2e38; --text: #e6e8ee;
+    --muted: #9aa3b2; --accent: #4f8cff; --ok: #3ddc84; --warn: #ffb020; --bad: #ff5d5d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; padding: 20px; }
+  .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 13px; margin-bottom: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .cam { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .cam header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); flex: none; }
+  .dot.on { background: var(--ok); }
+  .cam img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #000; }
+  .controls { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  .badge { font-size: 11px; color: var(--warn); border: 1px solid var(--warn);
+           border-radius: 99px; padding: 1px 8px; display: none; }
+  .toggle { font-size: 11px; padding: 2px 9px; border-radius: 99px; background: transparent;
+            border: 1px solid var(--line); color: var(--muted); cursor: pointer; }
+  .toggle.on { border-color: var(--ok); color: var(--ok); }
+  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  input, select, button { font: inherit; color: inherit; }
+  input, select { background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+                  padding: 8px 10px; width: 100%; margin-bottom: 10px; }
+  button { background: var(--accent); border: 0; border-radius: 8px; padding: 8px 14px; color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+  #pause-btn { margin-left: auto; }
+  #pause-btn.paused { border-color: var(--bad); color: var(--bad); }
+  .pose { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .pose .label { width: 56px; color: var(--muted); }
+  .pose .count { width: 40px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .bar { background: var(--bg); border: 1px solid var(--line); border-radius: 99px; height: 10px; flex: 1; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .25s; }
+  #instruction { font-size: 16px; font-weight: 600; margin: 10px 0 2px; min-height: 24px; }
+  #problem { color: var(--warn); min-height: 21px; }
+  #warning { color: var(--bad); }
+  #message { color: var(--ok); margin-top: 8px; min-height: 21px; }
+  .hint { color: var(--muted); margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 7px 6px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; }
+  td button { background: transparent; border: 1px solid var(--line); color: var(--bad); padding: 2px 10px; }
+  .muted { color: var(--muted); }
+  .event { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .event:last-child { border-bottom: 0; }
+  .event img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; background: #000; flex: none; }
+  .event .who { min-width: 0; }
+  .event .time { margin-left: auto; flex: none; font-size: 12px; }
+  .event.spoof { background: rgba(255, 93, 93, .07); }
+  .event.spoof img { outline: 2px solid var(--bad); }
+  .spoof-tag { color: var(--bad); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>Face Recognition</h1>
+  <button id="pause-btn" class="secondary"></button>
+</div>
+
+<div id="grid"></div>
+
+<div class="panels">
+  <div class="panel">
+    <h2>Enroll a person</h2>
+    <div id="enroll-form">
+      <input id="name" placeholder="Person's name" autocomplete="off">
+      <select id="cam-select"></select>
+      <button onclick="startEnroll()">Start guided enrollment</button>
+      <p class="hint">The person faces the selected camera and follows the prompts
+      shown on its stream: front, then left, then right.</p>
+    </div>
+    <div id="enroll-live" style="display:none">
+      <div id="enroll-title" class="muted"></div>
+      <div id="instruction"></div>
+      <div id="problem"></div>
+      <div class="pose" id="pose-center"><span class="label">center</span><div class="bar"><i></i></div><span class="count"></span></div>
+      <div class="pose" id="pose-left"><span class="label">left</span><div class="bar"><i></i></div><span class="count"></span></div>
+      <div class="pose" id="pose-right"><span class="label">right</span><div class="bar"><i></i></div><span class="count"></span></div>
+      <div id="warning"></div>
+      <button class="secondary" onclick="cancelEnroll()" style="margin-top:10px">Cancel</button>
+    </div>
+    <div id="message"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Recent sightings</h2>
+    <div id="events"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Enrolled people</h2>
+    <table>
+      <thead><tr><th>Name</th><th>Samples</th><th></th></tr></thead>
+      <tbody id="people-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+
+async function patchCam(id, body) {
+  await fetch('/api/cameras/' + id, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  loadCameras();
+}
+
+function renderPause(paused) {
+  const btn = $('#pause-btn');
+  btn.textContent = paused ? 'Recognition paused — resume' : 'Pause all recognition';
+  btn.classList.toggle('paused', paused);
+  btn.onclick = async () => {
+    await fetch('/api/recognition', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused: !paused })
+    });
+    loadCameras();
+  };
+}
+
+async function loadCameras() {
+  const data = await (await fetch('/api/cameras')).json();
+  renderPause(data.paused);
+  const grid = $('#grid');
+  for (const c of data.cameras) {
+    let card = document.getElementById('cam' + c.id);
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'cam';
+      card.id = 'cam' + c.id;
+      card.innerHTML = `
+        <header><span class="dot"></span><strong>Camera ${c.id}</strong>
+        <div class="controls">
+          <span class="badge">ENROLLING</span>
+          <button class="toggle rec" title="Recognition on/off">REC</button>
+          <button class="toggle power" title="Camera on/off">ON</button>
+        </div></header>
+        <img src="/stream/${c.id}" alt="Camera ${c.id}">`;
+      grid.appendChild(card);
+    }
+    card.querySelector('.dot').classList.toggle('on', c.connected);
+    card.querySelector('.badge').style.display = c.enrolling ? 'inline-block' : 'none';
+    const power = card.querySelector('.power');
+    power.classList.toggle('on', c.enabled);
+    power.textContent = c.enabled ? 'ON' : 'OFF';
+    power.onclick = () => patchCam(c.id, { enabled: !c.enabled });
+    const rec = card.querySelector('.rec');
+    rec.classList.toggle('on', c.recognition);
+    rec.onclick = () => patchCam(c.id, { recognition: !c.recognition });
+  }
+  const sel = $('#cam-select');
+  const current = sel.value;
+  sel.innerHTML = data.cameras.map(c => {
+    const ready = c.enabled && c.connected;
+    const note = !c.enabled ? ' (stopped)' : (!c.connected ? ' (offline)' : '');
+    return `<option value="${c.id}" ${ready ? '' : 'disabled'}>Camera ${c.id}${note}</option>`;
+  }).join('');
+  if (current) sel.value = current;
+}
+
+function fmtTime(utc) {
+  return new Date(utc.replace(' ', 'T') + 'Z').toLocaleString();
+}
+
+async function loadEvents() {
+  const evs = await (await fetch('/api/events?limit=30')).json();
+  $('#events').innerHTML = evs.length
+    ? evs.map(e => {
+      const liveTag = e.liveness == null ? ''
+        : e.live ? ` · live ${e.liveness.toFixed(2)}`
+        : ` · <span class="spoof-tag">SPOOF? ${e.liveness.toFixed(2)}</span>`;
+      return `
+      <div class="event${e.live === false ? ' spoof' : ''}">
+        <img src="/api/events/${e.id}/snapshot" loading="lazy"
+             onerror="this.style.visibility='hidden'">
+        <div class="who"><strong>${e.person}</strong>
+          <span class="muted">camera ${e.camera} · ${e.similarity.toFixed(2)}${liveTag}</span></div>
+        <span class="muted time">${fmtTime(e.created_at)}</span>
+      </div>`;
+    }).join('')
+    : '<p class="muted">No sightings yet</p>';
+}
+
+async function loadPeople() {
+  const people = await (await fetch('/api/people')).json();
+  $('#people-body').innerHTML = people.length
+    ? people.map(p => `<tr><td>${p.name}</td><td>${p.samples}</td>
+        <td><button onclick="delPerson('${p.name.replace(/'/g, "\\'")}')">delete</button></td></tr>`).join('')
+    : '<tr><td colspan="3" class="muted">No one enrolled yet</td></tr>';
+}
+
+async function delPerson(name) {
+  if (!confirm(`Delete '${name}' and all their samples?`)) return;
+  await fetch('/api/people/' + encodeURIComponent(name), { method: 'DELETE' });
+  loadPeople();
+}
+
+async function startEnroll() {
+  const name = $('#name').value.trim();
+  if (!name) { alert('Enter a name first'); return; }
+  const r = await fetch('/api/enroll/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, camera: parseInt($('#cam-select').value) })
+  });
+  if (!r.ok) alert((await r.json()).detail || 'Could not start enrollment');
+  pollEnroll();
+}
+
+async function cancelEnroll() {
+  await fetch('/api/enroll/cancel', { method: 'POST' });
+  pollEnroll();
+}
+
+let wasActive = false;
+async function pollEnroll() {
+  const s = await (await fetch('/api/enroll/status')).json();
+  const active = !!s.active;
+  $('#enroll-form').style.display = active ? 'none' : 'block';
+  $('#enroll-live').style.display = active ? 'block' : 'none';
+  if (active) {
+    $('#enroll-title').textContent = `Enrolling '${s.name}' on camera ${s.camera}`;
+    $('#instruction').textContent = s.instruction || '';
+    $('#problem').textContent = s.problem || '';
+    $('#warning').textContent = s.warning ? s.warning + ' — continuing anyway.' : '';
+    for (const [pose, n] of Object.entries(s.counts)) {
+      const row = document.getElementById('pose-' + pose);
+      if (!row) continue;
+      row.querySelector('.bar i').style.width = (100 * n / s.needed) + '%';
+      row.querySelector('.count').textContent = `${n}/${s.needed}`;
+    }
+  }
+  $('#message').textContent = (!active && s.state !== 'idle') ? (s.message || '') : '';
+  if (wasActive && !active) { loadPeople(); loadCameras(); $('#name').value = ''; }
+  wasActive = active;
+}
+
+loadCameras();
+loadPeople();
+loadEvents();
+pollEnroll();
+setInterval(loadCameras, 5000);
+setInterval(loadEvents, 5000);
+setInterval(pollEnroll, 600);
+</script>
+</body>
+</html>

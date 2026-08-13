@@ -1,0 +1,50 @@
+# Extension fields are only recognised at the top level. Nested under
+# `services:` this anchor was parsed as a real service and compose built a
+# stray face_recognition-x-base-1 container from it.
+x-base: &base
+  build: .
+  environment:
+    - USE_GPU=0
+    - DISPLAY=${DISPLAY}
+    - QT_X11_NO_MITSHM=1
+    # Derived from tools/eval_antispoof.py on our own capture conditions
+    # (ACER 2.62%). Re-run that harness on new hardware before trusting it.
+    - SPOOF_THRESH=0.48
+  volumes:
+    - ./Dataset:/app/Dataset
+    - ./camera_urls.json:/app/camera_urls.json:ro
+    - /tmp/.X11-unix:/tmp/.X11-unix:rw
+  devices:
+    - /dev/video0:/dev/video0
+  # network_mode: host    # uncomment for RTSP on host LAN
+
+services:
+
+  enroll:
+    <<: *base
+    container_name: face-enroll
+    stdin_open: true
+    tty: true
+    # This block REPLACES the anchor's environment rather than extending it,
+    # so anything added to x-base has to be repeated here.
+    environment:
+      - USE_GPU=0
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - CAMERA_URL=0
+      - SPOOF_THRESH=0.48
+    command: python enroll_new_faces.py
+
+  recognize:
+    <<: *base
+    container_name: face-recognize
+    restart: unless-stopped
+    command: python face_recognition.py
+
+  web:
+    <<: *base
+    container_name: face-web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    command: uvicorn app:app --host 0.0.0.0 --port 8000

@@ -1,93 +1,105 @@
-import paddlehub as hub
-import insightface_paddle as face
-import cv2
+"""
+Guided face enrollment from the terminal: walks the person through
+center / left / right head poses with quality-checked samples.
+
+The enrollment state machine lives in src/enrollment.py and is shared with
+the web service (app.py) — this script is just the terminal/preview frontend.
+Runs headless with terminal progress; shows a mirrored preview window when a
+display is available. Press 'q' in the preview to abort without saving.
+"""
 import os
-import time
 
-camera_url = "rtsp://192.168.0.100:8080/h264_pcm.sdp"
+import cv2
 
-parser = face.parser()
-args = parser.parse_args()
-args.build_index = "Dataset/index.bin"
-args.img_dir = "Dataset"
-args.label = "Dataset/labels.txt"
+from src.antispoof import load_antispoof
+from src.enrollment import SAMPLES_PER_POSE, GuidedEnrollment
+from src.face_engine import FaceEngine
 
-face_detector = hub.Module(name="pyramidbox_lite_mobile")
-predictor = face.InsightFace(args)
+_cam = os.environ.get("CAMERA_URL", "0")
+CAMERA_URL = int(_cam) if _cam.isdigit() else _cam
+# same knob app.py reads, so both enrollment paths gate samples identically
+SPOOF_THRESH = float(os.environ.get("SPOOF_THRESH", "0.5"))
 
 
-def draw_bounding_boxes(image, faces):
-    # Draw bounding boxes on the image
-    for face in faces:
-        left = int(face['left'])
-        right = int(face['right'])
-        top = int(face['top'])
-        bottom = int(face['bottom'])
-        confidence = face['confidence']
+def has_display():
+    """Check if a GUI display is available."""
+    try:
+        if not os.environ.get("DISPLAY"):
+            return False
+        cv2.namedWindow("_test", cv2.WINDOW_NORMAL)
+        cv2.destroyWindow("_test")
+        return True
+    except cv2.error:
+        return False
 
-        # Draw a rectangle around the face
-        cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 1)
-        label = f": {confidence:.2f}"
-        cv2.putText(image, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 1)
-    return image
-  
-def crop_and_save_face(img, filepath, box_list):
-  
-  for box in box_list:
-    xmin = int(box['left'])
-    ymin = int(box['top'])
-    xmax = int(box['right'])
-    ymax = int(box['bottom'])
-    face_img = img[ymin:ymax, xmin:xmax, :]
-    cv2.imwrite(filepath, face_img)
-    
-def write_to_file(filepath, person_name, filename="Dataset/labels.txt"):
-    modified_filepath = "./" + os.path.join(person_name, os.path.basename(filepath))
-    with open(filename, 'a') as f:
-        f.write("{}\t{}\n".format(modified_filepath, person_name))
-        
-def enter_person_name():
-    # Create a directory for the person's name
-    person_name = input("Enter the person's name: ")  # Prompt the user to enter the person's name
-    output_dir = os.path.join("Dataset", person_name)
-    os.makedirs(output_dir, exist_ok=True)
-    return person_name, output_dir
 
-def capture_face_images(camera_url, person_name, output_dir):
-    # Initialize the count
-    cnt = 0
+def main():
+    person_name = input("Enter the person's name: ").strip()
+    if not person_name:
+        print("Name required.")
+        return
 
-    # Start the webcam
-    cap = cv2.VideoCapture(camera_url)
+    engine = FaceEngine()
+    antispoof = load_antispoof()
+    if not antispoof.available:
+        print("Note: anti-spoofing model missing — enrolling without liveness checks.")
+    cap = cv2.VideoCapture(CAMERA_URL)
+    if not cap.isOpened():
+        print(f"Could not open camera: {CAMERA_URL}")
+        print("Set CAMERA_URL env var or edit the script.")
+        return
 
-    end_time = time.time() + 10
-    frame_count = 0
+    gui = has_display()
+    if gui:
+        print("Display detected — mirrored preview window. Press 'q' to abort.")
+    else:
+        print("No display — running headless. Follow the prompts below.")
 
-    while time.time() < end_time:
-        
-        # Capture frame-by-frame from the webcam
+    session = GuidedEnrollment(person_name, engine, antispoof=antispoof,
+                               min_liveness=SPOOF_THRESH)
+    warned = False
+
+    while session.state == "running":
         ret, frame = cap.read()
-        frame_count += 1
-        # Perform face detection on the frame
-        resized_frame = cv2.resize(frame, (640,480), interpolation= cv2.INTER_LINEAR)
-        result = face_detector.face_detection(images=[resized_frame])
-        box_list = result[0]['data']
-        img = draw_bounding_boxes(resized_frame, box_list)
-        cv2.imshow(f"Camera", img)
-        # Crop and save the detected faces
-        if frame_count % 4 == 0 and box_list:
-            filename = '{}_{}.jpeg'.format(person_name, cnt)
-            filepath = os.path.join(output_dir, filename)
-            crop_and_save_face(resized_frame, filepath, box_list)
-            write_to_file(filepath, person_name)
-            cnt += 1
-            
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-        
-if __name__ == '__main__':
-    
-    person_name, output_dir = enter_person_name()
-    capture_face_images(camera_url, person_name, output_dir)
-    predictor.build_index()
+        if not ret:
+            continue
+
+        info = session.step(frame, engine.detect(frame))
+
+        if info["warning"] and not warned:
+            print(f"\nWARNING: {info['warning']}. Continuing anyway.")
+            warned = True
+
+        status = "  ".join(f"{p} {n}/{SAMPLES_PER_POSE}" for p, n in info["counts"].items())
+        line = f"{status}  |  {info['instruction']}" + (f"  ({info['problem']})" if info["problem"] else "")
+        print(f"\r{line:<100}", end="", flush=True)
+
+        if gui:
+            preview = cv2.flip(frame, 1)  # mirror so "turn LEFT" feels natural
+            if info["bbox"] is not None:
+                w = frame.shape[1]
+                x1, y1, x2, y2 = info["bbox"]
+                color = (0, 255, 0) if info["accepted"] else (0, 165, 255)
+                cv2.rectangle(preview, (w - x2, y1), (w - x1, y2), color, 2)
+            cv2.putText(preview, info["instruction"], (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(preview, status, (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            if info["problem"]:
+                cv2.putText(preview, info["problem"], (10, 90),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+            cv2.imshow("Enroll", preview)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                session.cancel()
+
+    cap.release()
+    if gui:
+        cv2.destroyAllWindows()
+    print()  # newline after \r progress
+
+    _, message = session.finish()
+    print(message)
+
+
+if __name__ == "__main__":
+    main()
