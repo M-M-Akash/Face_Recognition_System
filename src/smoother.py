@@ -27,11 +27,15 @@ import time
 from collections import Counter, deque
 from statistics import median
 
-REVERIFY_S = 1.0      # how often a settled track re-runs recognition
-BBOX_ALPHA = 0.4      # EMA weight for the displayed box; 1.0 disables smoothing
-SNAP_IOU = 0.5        # below this the face moved fast — snap, don't lag behind it
-LIVENESS_VOTES = 3    # scores collected before a track's liveness is trusted
-LIVENESS_WINDOW = 5   # rolling scores kept per track; the median is the verdict
+from src.config import config
+
+# Defaults come from config.toml ([smoothing] and [antispoof]); every one is
+# still overridable per-instance through the constructor.
+REVERIFY_S = config.smoothing.reverify_s
+BBOX_ALPHA = config.smoothing.bbox_alpha
+SNAP_IOU = config.smoothing.snap_iou
+LIVENESS_VOTES = config.antispoof.votes
+LIVENESS_WINDOW = config.antispoof.window
 
 
 def _iou(a, b):
@@ -90,8 +94,14 @@ class IdentitySmoother:
         spoof_thresh: min median P(live) for a track to count as a live face
     """
 
-    def __init__(self, window=10, min_votes=6, iou_thresh=0.3, max_misses=5,
-                 reverify_s=REVERIFY_S, bbox_alpha=BBOX_ALPHA, spoof_thresh=0.5):
+    def __init__(self, window=None, min_votes=None, iou_thresh=None,
+                 max_misses=None, reverify_s=REVERIFY_S, bbox_alpha=BBOX_ALPHA,
+                 spoof_thresh=None):
+        window = config.smoothing.window if window is None else window
+        min_votes = config.smoothing.min_votes if min_votes is None else min_votes
+        iou_thresh = config.smoothing.iou_thresh if iou_thresh is None else iou_thresh
+        max_misses = config.smoothing.max_misses if max_misses is None else max_misses
+        spoof_thresh = config.antispoof.threshold if spoof_thresh is None else spoof_thresh
         self.window = window
         self.min_votes = min_votes
         self.iou_thresh = iou_thresh

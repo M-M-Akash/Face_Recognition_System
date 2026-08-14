@@ -41,11 +41,12 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from src.config import config
 from src.runtime import session_options
 
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = os.environ.get("SPOOF_MODEL_DIR", "models")
+MODEL_DIR = config.paths.spoof_models
 RELEASE = ("https://github.com/yakhyo/face-anti-spoofing/releases/download/weights")
 
 # (filename, crop scale, sha256)

@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
+from src.config import config
+
 EMB_DIM = 512
 
 _SCHEMA = """
@@ -67,7 +69,8 @@ CREATE TABLE IF NOT EXISTS captures (
 
 
 class FaceStore:
-    def __init__(self, db_path="Dataset/faces.db"):
+    def __init__(self, db_path=None):
+        db_path = config.paths.database if db_path is None else db_path
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False + our own lock: the web service touches the
@@ -176,10 +179,12 @@ class FaceStore:
 
     # -- recognition events --------------------------------------------------
 
-    def add_event(self, person, camera, similarity, snapshot=None, liveness=None, keep=500):
+    def add_event(self, person, camera, similarity, snapshot=None, liveness=None,
+                  keep=None):
         """Record a sighting; prunes the table to the most recent `keep` rows.
         `liveness` is P(live face) from the anti-spoofing model, None if the
         check didn't run."""
+        keep = config.events.keep if keep is None else keep
         with self._lock, self.conn:
             self.conn.execute(
                 "INSERT INTO events (person, camera, similarity, snapshot, liveness) "

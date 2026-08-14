@@ -10,7 +10,8 @@ Measured on a 2-physical-core i3-1115G4: SCRFD at 320x320 takes 4.7 ms on the au
 setting and 3.0 ms pinned to 2 intra-op threads. These models stop scaling at the
 physical core count (intra_op=4 was no faster than intra_op=2 for every model in
 the bundle), so the default budget is physical cores — not `os.cpu_count()`, which
-counts hyperthreads. Override with ORT_THREADS on a bigger deployment box.
+counts hyperthreads. Override with `runtime.threads` in config.toml on a bigger
+deployment box.
 
 insightface does not accept a SessionOptions, and fails to say so: FaceAnalysis
 forwards **kwargs to model_zoo.get_model, which reads `providers` and
@@ -25,6 +26,8 @@ import os
 
 import cv2
 import onnxruntime as ort
+
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +58,11 @@ def physical_cores():
 
 
 def thread_budget():
-    """Intra-op threads per session. ORT_THREADS overrides; default = physical cores."""
-    raw = os.environ.get("ORT_THREADS")
-    if raw:
-        try:
-            n = int(raw)
-            if n > 0:
-                return n
-        except ValueError:
-            pass
-        logger.warning(f"Ignoring ORT_THREADS={raw!r} — want a positive integer")
+    """Intra-op threads per session. `runtime.threads` in config.toml (or the
+    ORT_THREADS env var) wins; 0 means auto = physical cores."""
+    configured = config.runtime.threads
+    if configured and int(configured) > 0:
+        return int(configured)
     return physical_cores()
 
 

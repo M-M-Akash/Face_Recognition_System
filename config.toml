@@ -1,0 +1,120 @@
+# =============================================================================
+# Face recognition — all configuration lives here.
+#
+# Nothing in this file has to be set: every key below shows its default, so
+# deleting a line changes nothing. Delete the ones you don't care about.
+#
+# Environment variables override this file, so a container or a one-off run can
+# change a setting without editing a read-only mount. Only these are overridable:
+#   USE_GPU  ORT_THREADS  SPOOF_THRESH  SPOOF_MODEL_DIR  CAPTURE_DIR  DB_PATH
+#
+# Point at a different file with FR_CONFIG=/path/to/other.toml
+# =============================================================================
+
+[runtime]
+# Use the GPU. Requires onnxruntime-gpu instead of onnxruntime in
+# requirements.txt — installing both breaks the provider lookup.
+gpu = false
+
+# ONNX Runtime threads per model. 0 auto-detects *physical* cores, which is
+# these models stop scaling past that, and counting
+# hyperthreads measured slower.
+threads = 0
+
+
+[cameras]
+# Device indices (numbers) or RTSP/HTTP URLs (quoted strings), mixed freely:
+#   urls = [0, 1, "rtsp://user:pass@192.168.1.50:554/stream1"]
+urls = [0]
+
+# Which camera `python enroll_new_faces.py` opens. Leave unset for the first above.
+# enroll_camera = 0
+
+
+[paths]
+database = "Dataset/faces.db"      # people, embeddings, events, capture index
+captures = "Dataset/captures"      # attendance photos, as YYYY-MM-DD/name_time.jpg
+spoof_models = "models"            # anti-spoofing weights, downloaded on first run
+
+
+[detection]
+# Detector input size. Cost scales with area — measured on a 2-core CPU:
+#   640 -> 12.7 ms   480 -> 6.8 ms   416 -> 5.0 ms   320 -> 3.0 ms
+# Lower is faster but misses smaller, more distant faces. It does NOT affect
+# recognition accuracy for faces that are still detected: the embedding is
+# always cut from the full-resolution frame.
+det_size = 640
+
+# Cosine similarity below which a face is labelled "unknown". Raise to reduce
+# false matches, lower if enrolled people are being missed.
+rec_thresh = 0.45
+
+
+[antispoof]
+# Minimum median P(live) for a face to count as real. Below it: the box turns
+# red, /api/capture refuses, and the sighting is flagged live=false.
+#
+# THIS VALUE IS HARDWARE- AND CAMERA-SPECIFIC. 0.48 was derived from our own
+# capture conditions (ACER 2.62%). Re-derive it on new hardware:
+#   python -m tools.capture_pad_dataset --label live   --count 100
+#   python -m tools.capture_pad_dataset --label replay --count 100
+#   python -m tools.eval_antispoof --dataset Dataset/pad
+threshold = 0.48
+
+votes = 3      # liveness scores a face needs before its verdict is trusted
+window = 5     # rolling scores kept per face; the median is the verdict
+
+
+[smoothing]
+# Identity smoothing. A name is displayed only once it wins `min_votes` of the
+# last `window` recognitions, which suppresses single-frame misrecognitions.
+# Raising min_votes steadies a flickering *name*; it does nothing for a
+# jittering *box* — that is bbox_alpha.
+window = 10
+min_votes = 6
+
+iou_thresh = 0.3     # min box overlap to treat a detection as the same face
+max_misses = 5       # frames a face can vanish for before its track is dropped
+
+# How often an already-identified face is re-checked. This is the main CPU
+# lever: recognition costs ~7 ms per face, and a settled face learns nothing
+# from being re-identified every frame. Lower = faster to notice a swap,
+# more CPU.
+reverify_s = 1.0
+
+# Box smoothing, 0-1. Lower is steadier but lags a moving face; 1.0 disables it
+# and you get the detector's raw jitter (~3 px/frame; 0.4 gives ~1.4 px).
+bbox_alpha = 0.4
+snap_iou = 0.5       # below this overlap the face jumped — snap instead of easing
+
+
+[events]
+cooldown_s = 30      # min seconds between sightings of the same person+camera
+keep = 500           # sightings retained; older ones are pruned. Attendance
+                     # photos are NOT affected — they live in their own table.
+
+
+[enrollment]
+samples_per_pose = 5      # samples needed per pose (centre / left / right)
+max_seconds = 90          # give up if the poses aren't filled by then
+min_det_score = 0.6       # reject weak detections
+min_face_px = 80          # "move closer" below this box size
+min_blur_var = 20.0       # "too blurry" below this Laplacian variance
+dedup_sim = 0.99          # skip samples near-identical to one already taken
+sample_cooldown_s = 0.25  # minimum gap between accepted samples
+
+
+[stream]
+jpeg_quality = 80         # dashboard MJPEG quality
+capture_timeout_s = 2.0   # how long the PHOTO button waits for a live face,
+                          # so pressing it just before stepping into view works
+
+
+[timing]
+# Loop and reconnection behaviour. Rarely worth changing.
+reload_check_s = 2.0      # poll the DB for enrollments made by another process
+reconnect_s = 5.0         # retry a dead camera this often
+max_missed_reads = 30     # consecutive empty reads before a camera is "dead"
+frame_wait_s = 0.005      # nap when cameras are live but have no new frame
+idle_sleep_s = 0.1        # nap when nothing is connected
+fps_alpha = 0.2           # smoothing for the dashboard FPS readout

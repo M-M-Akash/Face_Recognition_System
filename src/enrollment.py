@@ -12,13 +12,16 @@ import time
 import cv2
 import numpy as np
 
-SAMPLES_PER_POSE = 5
-MAX_SECONDS = 90          # give up if the poses aren't filled by then
-MIN_DET_SCORE = 0.6
-MIN_FACE_PX = 80          # smallest acceptable face box side, in pixels
-MIN_BLUR_VAR = 20.0       # variance of Laplacian on the face crop
-DEDUP_SIM = 0.99          # skip samples nearly identical to one already taken
-SAMPLE_COOLDOWN = 0.25    # seconds between accepted samples
+from src.config import config
+
+# All from config.toml [enrollment].
+SAMPLES_PER_POSE = config.enrollment.samples_per_pose
+MAX_SECONDS = config.enrollment.max_seconds
+MIN_DET_SCORE = config.enrollment.min_det_score
+MIN_FACE_PX = config.enrollment.min_face_px
+MIN_BLUR_VAR = config.enrollment.min_blur_var
+DEDUP_SIM = config.enrollment.dedup_sim
+SAMPLE_COOLDOWN = config.enrollment.sample_cooldown_s
 
 # Yaw-ratio bins (see estimate_yaw). The gap between CENTER_MAX and SIDE_MIN
 # is a dead zone so no samples are taken while the head is mid-turn.
@@ -91,7 +94,7 @@ class GuidedEnrollment:
     """
 
     def __init__(self, person_name, engine, cam_id=None, max_seconds=MAX_SECONDS,
-                 antispoof=None, min_liveness=0.5):
+                 antispoof=None, min_liveness=config.antispoof.threshold):
         self.person_name = person_name
         self.engine = engine
         self.cam_id = cam_id

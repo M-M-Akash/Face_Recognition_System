@@ -1,15 +1,14 @@
 """
 Multi-camera real-time face recognition.
-Set USE_GPU=1 env var to use CUDA (requires onnxruntime-gpu installed).
+Cameras, GPU, and every threshold come from config.toml — see src/config.py.
 """
-import json
 import logging
-import os
 import time
 
 import cv2
 
 from src.VideoStream import VideoStream
+from src.config import config
 from src.face_engine import FaceEngine, draw_results
 from src.pipeline import recognize_frame
 from src.runtime import configure_opencv
@@ -17,15 +16,13 @@ from src.smoother import IdentitySmoother
 
 logging.basicConfig(level=logging.INFO)
 
-USE_GPU = os.environ.get("USE_GPU", "0") == "1"
-providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if USE_GPU else ["CPUExecutionProvider"]
-
-RELOAD_CHECK_S = 2.0  # how often to poll the store for new enrollments
+RELOAD_CHECK_S = config.timing.reload_check_s
 
 
 def run(camera_urls):
+    logging.info(f"Config: {config.source}")
     configure_opencv()
-    engine = FaceEngine(providers=providers)
+    engine = FaceEngine()
     cameras = [(i, VideoStream(url).start(), IdentitySmoother())
                for i, url in enumerate(camera_urls)]
     last_reload_check = 0.0
@@ -61,6 +58,4 @@ def run(camera_urls):
 
 
 if __name__ == "__main__":
-    with open("camera_urls.json") as f:
-        urls = json.load(f)
-    run(urls)
+    run(config.cameras.urls)

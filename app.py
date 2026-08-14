@@ -33,9 +33,7 @@ state is in-process:
 
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
-import json
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -49,6 +47,7 @@ from pydantic import BaseModel
 
 from src.VideoStream import VideoStream
 from src.antispoof import load_antispoof
+from src.config import CONFIG_PATH, config
 from src.enrollment import SAMPLES_PER_POSE, GuidedEnrollment
 from src.face_engine import FaceEngine, draw_results
 from src.pipeline import recognize_frame
@@ -58,22 +57,20 @@ from src.smoother import IdentitySmoother
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
 
-USE_GPU = os.environ.get("USE_GPU", "0") == "1"
-PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"] if USE_GPU else ["CPUExecutionProvider"]
-CAMERA_URLS_FILE = os.environ.get("CAMERA_URLS_FILE", "camera_urls.json")
-
-JPEG_QUALITY = 80
-RELOAD_CHECK_S = 2.0    # poll the store for out-of-process enrollments/deletes
-RECONNECT_S = 5.0       # retry a dead camera this often
-MAX_MISSED_READS = 30   # consecutive empty reads before a camera counts as dead
-EVENT_COOLDOWN_S = 30   # min seconds between events for the same person+camera
-SPOOF_THRESH = float(os.environ.get("SPOOF_THRESH", "0.5"))  # min P(live) for a clean sighting
-SPOOF_VOTES = 3            # liveness scores a track needs before its verdict is trusted
-CAPTURE_DIR = os.environ.get("CAPTURE_DIR", "Dataset/captures")
-CAPTURE_TIMEOUT_S = 2.0    # how long /api/capture waits for a live face to appear
-FPS_ALPHA = 0.2         # smoothing for the per-camera FPS readout
-FRAME_WAIT_S = 0.005    # cameras are live but haven't produced a new frame yet
-IDLE_SLEEP_S = 0.1      # nothing connected — don't spin while retrying
+# Everything tunable lives in config.toml; see src/config.py for the layering.
+PROVIDERS = config.providers()
+JPEG_QUALITY = config.stream.jpeg_quality
+RELOAD_CHECK_S = config.timing.reload_check_s
+RECONNECT_S = config.timing.reconnect_s
+MAX_MISSED_READS = config.timing.max_missed_reads
+EVENT_COOLDOWN_S = config.events.cooldown_s
+SPOOF_THRESH = config.antispoof.threshold
+SPOOF_VOTES = config.antispoof.votes
+CAPTURE_DIR = config.paths.captures
+CAPTURE_TIMEOUT_S = config.stream.capture_timeout_s
+FPS_ALPHA = config.timing.fps_alpha
+FRAME_WAIT_S = config.timing.frame_wait_s
+IDLE_SLEEP_S = config.timing.idle_sleep_s
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -452,8 +449,13 @@ app = FastAPI(title="Face Recognition")
 
 @app.on_event("startup")
 def startup():
-    with open(CAMERA_URLS_FILE) as f:
-        urls = json.load(f)
+    urls = config.cameras.urls
+    if not urls:
+        raise RuntimeError("No cameras configured — set `urls` under [cameras] "
+                           f"in {CONFIG_PATH}")
+    if Path("camera_urls.json").is_file():
+        logger.warning("camera_urls.json is no longer read — cameras now come "
+                       f"from [cameras] urls in {CONFIG_PATH}. Delete the old file.")
     configure_opencv()   # keep OpenCV's pool inside the same budget as ORT's
     state.engine = FaceEngine(providers=PROVIDERS)
     state.antispoof = load_antispoof(providers=PROVIDERS)
@@ -466,8 +468,10 @@ def startup():
     state.paused = store.get_setting("recognition_paused", "0") == "1"
     state.thread = threading.Thread(target=_process_loop, daemon=True)
     state.thread.start()
+    logger.info(f"Config: {config.source}")
     logger.info(f"Started with {len(state.cameras)} camera(s), paused={state.paused}, "
-                f"anti-spoofing={'on' if state.antispoof.available else 'OFF'}")
+                f"anti-spoofing={'on' if state.antispoof.available else 'OFF'}, "
+                f"gpu={'on' if config.runtime.gpu else 'off'}")
 
 
 @app.on_event("shutdown")

@@ -3,16 +3,18 @@
 # stray face_recognition-x-base-1 container from it.
 x-base: &base
   build: .
+  # Application settings live in config.toml, not here — it is bind-mounted
+  # below, so editing it takes effect on the next container start with no
+  # rebuild. Only X11 plumbing stays in the environment. (Settings CAN still be
+  # overridden per-service with USE_GPU / SPOOF_THRESH / ORT_THREADS /
+  # SPOOF_MODEL_DIR / CAPTURE_DIR / DB_PATH, which beat the file — handy for a
+  # one-off, but the file is the place to make a change stick.)
   environment:
-    - USE_GPU=0
     - DISPLAY=${DISPLAY}
     - QT_X11_NO_MITSHM=1
-    # Derived from tools/eval_antispoof.py on our own capture conditions
-    # (ACER 2.62%). Re-run that harness on new hardware before trusting it.
-    - SPOOF_THRESH=0.48
   volumes:
     - ./Dataset:/app/Dataset
-    - ./camera_urls.json:/app/camera_urls.json:ro
+    - ./config.toml:/app/config.toml:ro
     - /tmp/.X11-unix:/tmp/.X11-unix:rw
   devices:
     - /dev/video0:/dev/video0
@@ -25,14 +27,6 @@ services:
     container_name: face-enroll
     stdin_open: true
     tty: true
-    # This block REPLACES the anchor's environment rather than extending it,
-    # so anything added to x-base has to be repeated here.
-    environment:
-      - USE_GPU=0
-      - DISPLAY=${DISPLAY}
-      - QT_X11_NO_MITSHM=1
-      - CAMERA_URL=0
-      - SPOOF_THRESH=0.48
     command: python enroll_new_faces.py
 
   recognize:

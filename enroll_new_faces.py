@@ -12,13 +12,14 @@ import os
 import cv2
 
 from src.antispoof import load_antispoof
+from src.config import config
 from src.enrollment import SAMPLES_PER_POSE, GuidedEnrollment
 from src.face_engine import FaceEngine
 
-_cam = os.environ.get("CAMERA_URL", "0")
-CAMERA_URL = int(_cam) if _cam.isdigit() else _cam
+# [cameras] enroll_camera in config.toml, falling back to the first camera there
+CAMERA_URL = config.enroll_camera()
 # same knob app.py reads, so both enrollment paths gate samples identically
-SPOOF_THRESH = float(os.environ.get("SPOOF_THRESH", "0.5"))
+SPOOF_THRESH = config.antispoof.threshold
 
 
 def has_display():

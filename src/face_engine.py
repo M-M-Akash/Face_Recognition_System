@@ -9,6 +9,7 @@ import numpy as np
 from insightface.app import FaceAnalysis
 from insightface.app.common import Face
 
+from src.config import config
 from src.face_store import FaceStore
 from src.runtime import insightface_session_options
 
@@ -16,15 +17,21 @@ logger = logging.getLogger(__name__)
 
 
 class FaceEngine:
-    def __init__(self, db_path="Dataset/faces.db", rec_thresh=0.45,
-                 det_size=(640, 640), providers=None):
+    def __init__(self, db_path=None, rec_thresh=None, det_size=None,
+                 providers=None):
         """
+        Every argument defaults to config.toml; pass one only to override it.
+
         Args:
             db_path: SQLite database holding people + embeddings (see FaceStore)
             rec_thresh: cosine similarity threshold for recognition
             det_size: detection input size (smaller = faster, larger = better small-face recall)
-            providers: ONNX runtime providers. None = CPU. ["CUDAExecutionProvider"] for GPU.
+            providers: ONNX runtime providers. None = whatever [runtime] gpu says.
         """
+        db_path = config.paths.database if db_path is None else db_path
+        rec_thresh = config.detection.rec_thresh if rec_thresh is None else rec_thresh
+        det_size = config.detection.det_size_wh() if det_size is None else det_size
+        providers = config.providers() if providers is None else providers
         self.rec_thresh = rec_thresh
         self.store = FaceStore(db_path)
 
