@@ -25,10 +25,13 @@ Pure bookkeeping — no model inference happens in here.
 """
 import time
 from collections import Counter, deque
+from statistics import median
 
 REVERIFY_S = 1.0      # how often a settled track re-runs recognition
 BBOX_ALPHA = 0.4      # EMA weight for the displayed box; 1.0 disables smoothing
 SNAP_IOU = 0.5        # below this the face moved fast — snap, don't lag behind it
+LIVENESS_VOTES = 3    # scores collected before a track's liveness is trusted
+LIVENESS_WINDOW = 5   # rolling scores kept per track; the median is the verdict
 
 
 def _iou(a, b):
@@ -53,6 +56,16 @@ class _Track:
         self.last_embed = 0.0
         self.settled = False        # identity established; safe to re-check lazily
         self.needs_embed = True     # set per frame by associate()
+        self.liveness_scores = deque(maxlen=LIVENESS_WINDOW)
+        self.last_liveness = 0.0
+        self.needs_liveness = True  # set per frame by associate()
+
+    @property
+    def liveness(self):
+        """Median P(live) over the recent window, or None if never scored."""
+        if not self.liveness_scores:
+            return None
+        return median(self.liveness_scores)
 
     def observe(self, bbox, alpha):
         raw = tuple(float(v) for v in bbox)
@@ -74,16 +87,18 @@ class IdentitySmoother:
         max_misses: drop a track after this many frames without a detection
         reverify_s: how often a settled track re-runs recognition
         bbox_alpha: EMA weight for the displayed box (1.0 = raw, no smoothing)
+        spoof_thresh: min median P(live) for a track to count as a live face
     """
 
     def __init__(self, window=10, min_votes=6, iou_thresh=0.3, max_misses=5,
-                 reverify_s=REVERIFY_S, bbox_alpha=BBOX_ALPHA):
+                 reverify_s=REVERIFY_S, bbox_alpha=BBOX_ALPHA, spoof_thresh=0.5):
         self.window = window
         self.min_votes = min_votes
         self.iou_thresh = iou_thresh
         self.max_misses = max_misses
         self.reverify_s = reverify_s
         self.bbox_alpha = bbox_alpha
+        self.spoof_thresh = spoof_thresh
         self.tracks = []
         self.embeds = 0     # cumulative recognitions recorded; see record()
 
@@ -117,6 +132,7 @@ class IdentitySmoother:
             best.det_score = float(det_score)
             best.observe(bbox, self.bbox_alpha)
             best.needs_embed = self._needs_embed(best, now)
+            best.needs_liveness = self._needs_liveness(best, now)
             matched.append(best)
 
         self.tracks = [t for t in self.tracks if t.misses <= self.max_misses]
@@ -143,6 +159,14 @@ class IdentitySmoother:
             track.settled = (verdict != "unknown"
                              or len(track.votes) == self.window)
 
+    def record_liveness(self, track, score, now=None):
+        """Feed one anti-spoofing score into a track's liveness window. A None
+        score (degenerate crop, or no model) is not evidence of an attack and is
+        discarded — the same fail-open rule GuidedEnrollment._spoofed uses."""
+        track.last_liveness = time.monotonic() if now is None else now
+        if score is not None:
+            track.liveness_scores.append(float(score))
+
     def results(self):
         """Result dicts for the tracks seen in the most recent frame."""
         out = []
@@ -151,6 +175,7 @@ class IdentitySmoother:
                 continue
             label, score = self._verdict(t)
             raw_label, raw_score = t.votes[-1] if t.votes else ("unknown", 0.0)
+            liveness = t.liveness
             out.append({
                 # smoothed box for drawing; raw box for anything that needs to
                 # be positionally accurate (face crops, anti-spoofing)
@@ -161,10 +186,29 @@ class IdentitySmoother:
                 "raw_label": raw_label,
                 "raw_score": raw_score,
                 "det_score": t.det_score,
+                # liveness is None until the model has been run; `live` fails
+                # open in that case, so an absent anti-spoofing model never
+                # blocks recognition. Consumers that must not be fooled should
+                # check liveness_n >= LIVENESS_VOTES before trusting `live`.
+                "liveness": liveness,
+                "liveness_n": len(t.liveness_scores),
+                "live": liveness is None or liveness >= self.spoof_thresh,
             })
         return out
 
     # -- internals --
+
+    def _needs_liveness(self, track, now):
+        # Score every frame until the window has enough samples to be trusted,
+        # then re-check lazily. Sampling lazily from the start would delay the
+        # first trustworthy verdict by LIVENESS_VOTES seconds, which would show
+        # up as events that take seconds to appear.
+        if len(track.liveness_scores) < LIVENESS_VOTES:
+            return True
+        if now - track.last_liveness >= self.reverify_s:
+            return True
+        # the box jumped — this may not be the same face we scored
+        return _iou(track.raw_bbox, track.embed_bbox) < SNAP_IOU
 
     def _needs_embed(self, track, now):
         if not track.settled:

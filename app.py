@@ -8,7 +8,9 @@ FastAPI web service for the face recognition system.
 - /api/enroll/start|cancel   guided enrollment control
 - /api/enroll/status         live enrollment progress (polled by the UI)
 - /api/people                list / delete enrolled people
-- /api/events                recent sightings; /api/events/{id}/snapshot for the face crop
+- /api/events                recent sightings; /api/events/{id}/snapshot for legacy crops
+- /api/capture               POST {"camera": id} — take an attendance photo
+- /api/captures              recent photos; /api/captures/{id}/photo serves the file
 
 Capture, processing, and viewing are independent per camera:
 - `enabled` off releases the device entirely (desired state, persisted in the DB);
@@ -16,10 +18,14 @@ Capture, processing, and viewing are independent per camera:
 - JPEG encoding only happens while someone is actually watching the stream.
 Recognition output is written to the `events` table (one sighting per person
 per camera per EVENT_COOLDOWN_S), so the streams are just a view — the events
-log is the product. When the anti-spoofing model is present, each event is
-liveness-gated: SPOOF_VOTES scores are collected on consecutive frames, the
-median is stored on the event, and events below SPOOF_THRESH are flagged
-(`live: false` in the API) — attendance/door-unlock consumers must check it.
+log is the product. Sightings store no image; photos are taken deliberately.
+
+Liveness lives on the track, scored on a schedule by the smoother, so every
+result carries `liveness` and `live`. Three things consume it: a face below
+SPOOF_THRESH draws a red SPOOF? box instead of a name, /api/capture refuses to
+save a photo of it, and events record the median for the audit trail (still
+written when spoofed, flagged `live: false` — attendance/door-unlock consumers
+must check that flag).
 
 One background thread owns all camera reads and inference; request handlers
 only read the latest JPEG or flip small state. Run with a SINGLE worker —
@@ -32,6 +38,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -61,18 +68,45 @@ RECONNECT_S = 5.0       # retry a dead camera this often
 MAX_MISSED_READS = 30   # consecutive empty reads before a camera counts as dead
 EVENT_COOLDOWN_S = 30   # min seconds between events for the same person+camera
 SPOOF_THRESH = float(os.environ.get("SPOOF_THRESH", "0.5"))  # min P(live) for a clean sighting
-SPOOF_VOTES = 3            # liveness scores (one per frame) collected before an event is written
-SPOOF_PENDING_TTL_S = 5.0  # abandon a half-collected liveness check if the person vanishes
+SPOOF_VOTES = 3            # liveness scores a track needs before its verdict is trusted
+CAPTURE_DIR = os.environ.get("CAPTURE_DIR", "Dataset/captures")
+CAPTURE_TIMEOUT_S = 2.0    # how long /api/capture waits for a live face to appear
 FPS_ALPHA = 0.2         # smoothing for the per-camera FPS readout
 FRAME_WAIT_S = 0.005    # cameras are live but haven't produced a new frame yet
 IDLE_SLEEP_S = 0.1      # nothing connected — don't spin while retrying
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
+def _new_smoother():
+    """Every smoother needs the same spoof threshold — it decides `live` on each
+    result, which drives both the red box and the capture gate."""
+    return IdentitySmoother(spoof_thresh=SPOOF_THRESH)
+
+
 def _placeholder_jpeg(text):
     img = np.full((360, 640, 3), 30, np.uint8)
     cv2.putText(img, text, (20, 190), FONT, 0.8, (200, 200, 200), 2)
     return cv2.imencode(".jpg", img)[1].tobytes()
+
+
+class CaptureRequest:
+    """A pending 'take a photo' ask, handed from a request thread to the worker.
+
+    The worker owns every frame (see the module docstring), so the handler can't
+    grab one itself. It parks one of these on the camera instead and waits. The
+    worker only resolves it once it can decide — a face present and scored —
+    which is what lets someone press the button a moment before stepping into
+    view. The handler's timeout is what ends an ask nobody ever satisfies.
+    """
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.error = None       # human-readable refusal, None on success
+        self.payload = None     # capture row on success
+
+    def resolve(self, payload=None, error=None):
+        self.payload, self.error = payload, error
+        self.done.set()
 
 
 class Camera:
@@ -82,7 +116,7 @@ class Camera:
         self.enabled = enabled
         self.recognition = recognition
         self.stream = None
-        self.smoother = IdentitySmoother()
+        self.smoother = _new_smoother()
         self.connected = False
         self.misses = 0
         self.last_attempt = 0.0
@@ -94,6 +128,8 @@ class Camera:
         self.embeds = 0.0       # EMA of recognitions run per frame; see tick()
         self.last_frame_at = 0.0
         self.last_seq = -1      # last VideoStream frame we actually processed
+        self.capture = None     # pending CaptureRequest, serviced by the worker
+        self.spoof = False      # latest frame showed a suspected presentation attack
 
     def publish(self, jpeg):
         self.jpeg = jpeg
@@ -124,6 +160,9 @@ class Camera:
         self.embeds = 0.0
         self.last_frame_at = 0.0
         self.last_seq = -1
+        if self.capture is not None:
+            self.capture.resolve(error=f"Camera {self.id} was stopped")
+            self.capture = None
 
 
 class AppState:
@@ -136,7 +175,6 @@ class AppState:
         self.lock = threading.Lock()  # guards enroll session swaps
         self.viewer_lock = threading.Lock()
         self.last_event_at = {}       # (cam_id, person) -> monotonic-ish timestamp
-        self.pending_liveness = {}    # (cam_id, person) -> liveness votes being collected
         self.stop = threading.Event()
         self.thread = None
 
@@ -177,29 +215,78 @@ def _read_frame(cam, now):
     return frame
 
 
-def _face_snapshot(frame, bbox):
-    """JPEG crop of the face with 25% padding, for the events log."""
-    x1, y1, x2, y2 = bbox
-    pad_w, pad_h = int(0.25 * (x2 - x1)), int(0.25 * (y2 - y1))
-    h, w = frame.shape[:2]
-    x1, y1 = max(0, x1 - pad_w), max(0, y1 - pad_h)
-    x2, y2 = min(w, x2 + pad_w), min(h, y2 + pad_h)
-    crop = frame[y1:y2, x1:x2]
-    if crop.size == 0:
-        return None
-    ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return buf.tobytes() if ok else None
+def _safe_name(person):
+    """A person's name reaches us from enrollment, so it is not a safe filename."""
+    cleaned = "".join(c if c.isalnum() or c in "-_" else "_" for c in person)
+    return cleaned.strip("_") or "unknown"
 
 
-def _emit_events(cam, frame, results, now):
+def _service_capture(cam, frame, results, now):
+    """Take a deliberate attendance photo, if the scene allows it right now.
+
+    Returns without resolving the request when there is nothing to decide on yet
+    (no face, or liveness not sampled) so the worker retries on the next frame.
+    A spoof is a decision, not a retry: it resolves immediately as a refusal.
+
+    `frame` must be the clean frame — this runs before draw_results, so the
+    stored photo has no boxes burnt into it.
+    """
+    request = cam.capture
+    if not results:
+        return                       # nobody in view yet — keep waiting
+    # largest face wins, the same convention capture_pad_dataset.py uses
+    target = max(results, key=lambda r: ((r["raw_bbox"][2] - r["raw_bbox"][0]) *
+                                         (r["raw_bbox"][3] - r["raw_bbox"][1])))
+
+    if state.antispoof.available:
+        if target["liveness_n"] < SPOOF_VOTES:
+            return                   # still scoring — keep waiting
+        if not target["live"]:
+            cam.capture = None
+            request.resolve(error=(f"Looks like a photo or screen "
+                                   f"(liveness {target['liveness']:.2f} < {SPOOF_THRESH}) "
+                                   f"— use a live face"))
+            logger.warning(f"Capture refused on camera {cam.id}: suspected spoof "
+                           f"(liveness {target['liveness']:.2f})")
+            return
+
+    person = target["label"]
+    stamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(now))
+    day = stamp.split("_")[0]
+    directory = Path(CAPTURE_DIR) / day
+    directory.mkdir(parents=True, exist_ok=True)
+    relative = f"{day}/{_safe_name(person)}_{stamp.split('_')[1]}_cam{cam.id}.jpg"
+    path = Path(CAPTURE_DIR) / relative
+    if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 90]):
+        cam.capture = None
+        request.resolve(error="Could not write the photo to disk")
+        logger.error(f"Capture failed: cv2.imwrite returned False for {path}")
+        return
+
+    capture_id = state.engine.store.add_capture(
+        person, cam.id, relative, target["score"], target["liveness"])
+    cam.capture = None
+    request.resolve(payload={
+        "id": capture_id, "person": person, "camera": cam.id,
+        "path": relative, "similarity": target["score"],
+        "liveness": target["liveness"],
+    })
+    logger.info(f"Captured {person} on camera {cam.id} -> {path}")
+
+
+def _emit_events(cam, results, now):
     """One sighting per (camera, person) per cooldown window. Uses the
     smoothed label, so a sighting means the identity won the majority vote.
 
-    When the anti-spoofing model is loaded, an event isn't written until
-    SPOOF_VOTES liveness scores have been collected on consecutive frames;
-    the median goes on the event, and a median below SPOOF_THRESH marks the
-    sighting as a suspected spoof (still recorded, for the audit trail).
-    Costs a few ms per event, nothing on ordinary frames."""
+    Liveness comes from the track (see IdentitySmoother.record_liveness) rather
+    than being collected here: one source of truth, and no second set of
+    anti-spoofing calls on the same face. When the model is loaded, an event
+    waits until the track has SPOOF_VOTES scores, so a sighting is never written
+    on a liveness verdict too thin to trust. A median below SPOOF_THRESH still
+    records the sighting, flagged, for the audit trail.
+
+    No image is stored. Attendance photos are taken deliberately via
+    /api/capture; a sighting is a log line, not a picture."""
     for r in results:
         person = r["label"]
         if person == "unknown":
@@ -208,47 +295,21 @@ def _emit_events(cam, frame, results, now):
         if now - state.last_event_at.get(key, 0.0) < EVENT_COOLDOWN_S:
             continue
 
-        # the raw detection, not the EMA-smoothed display box: the snapshot and
-        # the anti-spoofing crop want positional accuracy, and scaled_crop's
-        # geometry is what SPOOF_THRESH was measured against
-        bbox = r.get("raw_bbox", r["bbox"])
+        liveness = r["liveness"]
+        if state.antispoof.available and r["liveness_n"] < SPOOF_VOTES:
+            continue    # not enough scores yet — try again next frame
 
-        if not state.antispoof.available:
-            state.last_event_at[key] = now
-            state.engine.store.add_event(person, cam.id, r["score"],
-                                         _face_snapshot(frame, bbox))
+        state.last_event_at[key] = now
+        state.engine.store.add_event(person, cam.id, r["score"], None, liveness)
+        if liveness is None:
             logger.info(f"Sighting: {person} on camera {cam.id} "
                         f"(similarity {r['score']:.2f})")
-            continue
-
-        pending = state.pending_liveness.get(key)
-        if pending is None:
-            pending = state.pending_liveness[key] = {
-                "scores": [], "snapshot": _face_snapshot(frame, bbox),
-                "similarity": r["score"], "last": now}
-        pending["last"] = now
-        score = state.antispoof.score(frame, bbox)
-        if score is not None:
-            pending["scores"].append(score)
-        if len(pending["scores"]) < SPOOF_VOTES:
-            continue
-
-        liveness = float(np.median(pending["scores"]))
-        del state.pending_liveness[key]
-        state.last_event_at[key] = now
-        state.engine.store.add_event(person, cam.id, pending["similarity"],
-                                     pending["snapshot"], liveness)
-        if liveness < SPOOF_THRESH:
+        elif liveness < SPOOF_THRESH:
             logger.warning(f"SPOOF suspected: {person} on camera {cam.id} "
                            f"(liveness {liveness:.2f} < {SPOOF_THRESH})")
         else:
             logger.info(f"Sighting: {person} on camera {cam.id} (similarity "
-                        f"{pending['similarity']:.2f}, liveness {liveness:.2f})")
-
-    # a person who vanished mid-check shouldn't leave a stale entry behind
-    for key in [k for k, p in state.pending_liveness.items()
-                if k[0] == cam.id and now - p["last"] > SPOOF_PENDING_TTL_S]:
-        del state.pending_liveness[key]
+                        f"{r['score']:.2f}, liveness {liveness:.2f})")
 
 
 def _draw_enroll_overlay(frame, session, info):
@@ -302,12 +363,16 @@ def _process_loop():
                 if session.state in ("complete", "timeout"):
                     _, message = session.finish()
                     logger.info(message)
-                    cam.smoother = IdentitySmoother()  # drop stale tracks
+                    cam.smoother = _new_smoother()  # drop stale tracks
             elif cam.recognition and not state.paused:
                 before = cam.smoother.embeds
-                results = recognize_frame(state.engine, cam.smoother, frame, now)
+                results = recognize_frame(state.engine, cam.smoother, frame, now,
+                                          antispoof=state.antispoof)
                 embeds = cam.smoother.embeds - before
-                _emit_events(cam, frame, results, now)  # snapshot before boxes are drawn
+                cam.spoof = any(not r["live"] for r in results)
+                _emit_events(cam, results, now)
+                if cam.capture is not None:      # capture the clean frame,
+                    _service_capture(cam, frame, results, now)   # before boxes
                 draw_results(frame, results)
             else:
                 tag = "recognition paused" if state.paused else "recognition off"
@@ -358,6 +423,7 @@ def _camera_payload(cam):
         "viewers": cam.viewers,
         "fps": round(cam.fps, 1),
         "embeds": round(cam.embeds, 2),
+        "spoof": cam.spoof,
         "enrolling": bool(session and session.state == "running" and session.cam_id == cam.id),
     }
 
@@ -446,7 +512,7 @@ def patch_camera(cam_id: int, req: CameraPatch):
                     session.cancel()
     if req.recognition is not None:
         cam.recognition = req.recognition
-        cam.smoother = IdentitySmoother()  # don't carry tracks across the toggle
+        cam.smoother = _new_smoother()  # don't carry tracks across the toggle
     logger.info(f"Camera {cam_id}: enabled={cam.enabled} recognition={cam.recognition}")
     return _camera_payload(cam)
 
@@ -527,6 +593,55 @@ def delete_person(name: str):
     logger.info(f"Deleted person '{name}'")
     # the processing loop's maybe_reload() picks this up within ~2s
     return {"deleted": name}
+
+
+class CaptureCommand(BaseModel):
+    camera: int
+
+
+@app.post("/api/capture")
+def capture(req: CaptureCommand):
+    """Take an attendance photo. Refuses a suspected spoof."""
+    cam = state.cameras.get(req.camera)
+    if cam is None:
+        raise HTTPException(404, f"No camera {req.camera}")
+    if not cam.enabled:
+        raise HTTPException(409, f"Camera {req.camera} is stopped — start it first")
+    if not cam.connected:
+        raise HTTPException(409, f"Camera {req.camera} is not connected")
+    if not cam.recognition or state.paused:
+        raise HTTPException(409, "Recognition is off for this camera — "
+                                 "there is no face to verify")
+    if cam.capture is not None:
+        raise HTTPException(409, "A capture is already in progress")
+
+    request = CaptureRequest()
+    cam.capture = request
+    if not request.done.wait(timeout=CAPTURE_TIMEOUT_S):
+        cam.capture = None
+        raise HTTPException(504, "No live face in view — stand in front of the camera")
+    if request.error:
+        raise HTTPException(409, request.error)
+    return request.payload
+
+
+@app.get("/api/captures")
+def captures(limit: int = 30):
+    return state.engine.store.list_captures(min(max(limit, 1), 200))
+
+
+@app.get("/api/captures/{capture_id}/photo")
+def capture_photo(capture_id: int):
+    relative = state.engine.store.capture_path(capture_id)
+    if relative is None:
+        raise HTTPException(404, "No such capture")
+    root = Path(CAPTURE_DIR).resolve()
+    path = (root / relative).resolve()
+    # the path came out of our own DB, but resolve-and-check anyway: a stored
+    # row is still untrusted input as far as the filesystem is concerned
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(404, "Photo file is missing")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @app.get("/api/events")

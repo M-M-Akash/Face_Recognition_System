@@ -27,6 +27,9 @@
   .toggle { font-size: 11px; padding: 2px 9px; border-radius: 99px; background: transparent;
             border: 1px solid var(--line); color: var(--muted); cursor: pointer; }
   .toggle.on { border-color: var(--ok); color: var(--ok); }
+  .toggle:disabled { opacity: .4; cursor: not-allowed; }
+  .toggle.blocked { border-color: var(--bad); color: var(--bad); opacity: 1; }
+  .spoof-badge { color: var(--bad); border-color: var(--bad); }
   .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
   .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
   input, select, button { font: inherit; color: inherit; }
@@ -98,6 +101,11 @@
   </div>
 
   <div class="panel">
+    <h2>Captured photos</h2>
+    <div id="captures"></div>
+  </div>
+
+  <div class="panel">
     <h2>Enrolled people</h2>
     <table>
       <thead><tr><th>Name</th><th>Samples</th><th></th></tr></thead>
@@ -147,6 +155,8 @@ async function loadCameras() {
         <div class="controls">
           <span class="fps" title="Frames per second actually processed"></span>
           <span class="badge">ENROLLING</span>
+          <span class="badge spoof-badge">SPOOF?</span>
+          <button class="toggle shot" title="Take an attendance photo">PHOTO</button>
           <button class="toggle rec" title="Recognition on/off">REC</button>
           <button class="toggle power" title="Camera on/off">ON</button>
         </div></header>
@@ -164,6 +174,15 @@ async function loadCameras() {
     const rec = card.querySelector('.rec');
     rec.classList.toggle('on', c.recognition);
     rec.onclick = () => patchCam(c.id, { recognition: !c.recognition });
+    card.querySelector('.spoof-badge').style.display = c.spoof ? 'inline-block' : 'none';
+    const shot = card.querySelector('.shot');
+    const canShoot = c.enabled && c.connected && c.recognition && !data.paused;
+    shot.disabled = !canShoot || c.spoof;
+    shot.classList.toggle('blocked', c.spoof);
+    shot.title = c.spoof ? 'Suspected photo or screen — capture blocked'
+      : canShoot ? 'Take an attendance photo'
+      : 'Camera and recognition must both be on';
+    shot.onclick = () => takePhoto(c.id);
   }
   const sel = $('#cam-select');
   const current = sel.value;
@@ -179,6 +198,42 @@ function fmtTime(utc) {
   return new Date(utc.replace(' ', 'T') + 'Z').toLocaleString();
 }
 
+async function takePhoto(id) {
+  const btn = document.querySelector('#cam' + id + ' .shot');
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    const r = await fetch('/api/capture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ camera: id })
+    });
+    if (!r.ok) alert((await r.json()).detail || 'Could not take the photo');
+    else loadCaptures();
+  } finally {
+    btn.textContent = 'PHOTO';
+    loadCameras();     // re-derives disabled state from the live camera status
+  }
+}
+
+async function loadCaptures() {
+  const shots = await (await fetch('/api/captures?limit=30')).json();
+  $('#captures').innerHTML = shots.length
+    ? shots.map(s => {
+      const live = s.liveness == null ? '' : ` · live ${s.liveness.toFixed(2)}`;
+      const sim = s.similarity == null ? '' : ` · ${s.similarity.toFixed(2)}`;
+      return `
+      <div class="event">
+        <img src="/api/captures/${s.id}/photo" loading="lazy"
+             onerror="this.style.visibility='hidden'">
+        <div class="who"><strong>${s.person}</strong>
+          <span class="muted">camera ${s.camera}${sim}${live}</span></div>
+        <span class="muted time">${fmtTime(s.created_at)}</span>
+      </div>`;
+    }).join('')
+    : '<p class="muted">No photos taken yet</p>';
+}
+
 async function loadEvents() {
   const evs = await (await fetch('/api/events?limit=30')).json();
   $('#events').innerHTML = evs.length
@@ -188,8 +243,6 @@ async function loadEvents() {
         : ` · <span class="spoof-tag">SPOOF? ${e.liveness.toFixed(2)}</span>`;
       return `
       <div class="event${e.live === false ? ' spoof' : ''}">
-        <img src="/api/events/${e.id}/snapshot" loading="lazy"
-             onerror="this.style.visibility='hidden'">
         <div class="who"><strong>${e.person}</strong>
           <span class="muted">camera ${e.camera} · ${e.similarity.toFixed(2)}${liveTag}</span></div>
         <span class="muted time">${fmtTime(e.created_at)}</span>
@@ -255,9 +308,13 @@ async function pollEnroll() {
 loadCameras();
 loadPeople();
 loadEvents();
+loadCaptures();
 pollEnroll();
-setInterval(loadCameras, 5000);
+// faster than the other panels: this drives the SPOOF badge and whether PHOTO is
+// clickable, which should not lag several seconds behind the red box on the video
+setInterval(loadCameras, 1500);
 setInterval(loadEvents, 5000);
+setInterval(loadCaptures, 5000);
 setInterval(pollEnroll, 600);
 </script>
 </body>

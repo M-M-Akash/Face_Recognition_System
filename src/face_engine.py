@@ -130,8 +130,15 @@ class FaceEngine:
 def draw_results(frame, results):
     for r in results:
         x1, y1, x2, y2 = r["bbox"]
-        label = f"{r['label']} {r['score']:.2f}"
-        color = (0, 255, 0) if r["label"] != "unknown" else (0, 165, 255)
+        if r.get("live") is False:
+            # Deliberately show the spoof verdict INSTEAD of the name: a
+            # presentation attack that displays the victim's identity on screen
+            # is exactly the outcome the liveness check exists to prevent.
+            color = (0, 0, 255)                       # red (BGR)
+            label = f"SPOOF? {r['liveness']:.2f}"
+        else:
+            color = (0, 255, 0) if r["label"] != "unknown" else (0, 165, 255)
+            label = f"{r['label']} {r['score']:.2f}"
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         cv2.putText(frame, label, (x1, max(y1 - 10, 0)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)

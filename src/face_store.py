@@ -1,7 +1,7 @@
 """
 SQLite-backed store for the face recognition system: embeddings, per-camera
-desired state (enabled/recognition), recognition events (sightings with face
-snapshots), and key-value settings.
+desired state (enabled/recognition), recognition events (sightings), an index of
+deliberately-taken attendance photos, and key-value settings.
 
 For embeddings it replaces the pickle index: writes are atomic transactions,
 individual people can be listed/deleted, and a version counter lets a
@@ -47,6 +47,19 @@ CREATE TABLE IF NOT EXISTS events (
     camera     INTEGER NOT NULL,
     similarity REAL NOT NULL,
     snapshot   BLOB,
+    liveness   REAL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- Deliberately taken attendance photos. Separate from `events` because events
+-- are pruned to the newest 500 on every insert: an attendance record must not
+-- be evicted by ordinary sightings. The image itself is a file on disk, not a
+-- blob — `path` is relative to the capture root so the folder can be moved.
+CREATE TABLE IF NOT EXISTS captures (
+    id         INTEGER PRIMARY KEY,
+    person     TEXT NOT NULL,
+    camera     INTEGER NOT NULL,
+    path       TEXT NOT NULL,
+    similarity REAL,
     liveness   REAL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -190,6 +203,37 @@ class FaceStore:
         with self._lock:
             row = self.conn.execute(
                 "SELECT snapshot FROM events WHERE id = ?", (event_id,)).fetchone()
+        return row[0] if row else None
+
+    # -- deliberate attendance captures ---------------------------------------
+
+    def add_capture(self, person, camera, path, similarity=None, liveness=None):
+        """Index a photo already written to disk. Never pruned, and deliberately
+        does NOT bump the version counter — that tracks the face index only, and
+        bumping it here would make every recognizer reload on each photo."""
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO captures (person, camera, path, similarity, liveness) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (person, int(camera), str(path),
+                 None if similarity is None else float(similarity),
+                 None if liveness is None else float(liveness)))
+        return cur.lastrowid
+
+    def list_captures(self, limit=50):
+        """Most recent attendance photos, newest first."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT id, person, camera, path, similarity, liveness, created_at "
+                "FROM captures ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [{"id": r[0], "person": r[1], "camera": r[2], "path": r[3],
+                 "similarity": r[4], "liveness": r[5], "created_at": r[6]}
+                for r in rows]
+
+    def capture_path(self, capture_id):
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT path FROM captures WHERE id = ?", (capture_id,)).fetchone()
         return row[0] if row else None
 
     def migrate_from_pickle(self, pkl_path):
