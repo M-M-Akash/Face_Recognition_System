@@ -41,6 +41,8 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from src.runtime import session_options
+
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = os.environ.get("SPOOF_MODEL_DIR", "models")
@@ -152,9 +154,11 @@ class MiniVisionAntiSpoof:
                  else [(os.path.join(model_dir or MODEL_DIR, n), s)
                        for n, s, _ in MODELS
                        if os.path.isfile(os.path.join(model_dir or MODEL_DIR, n))])
+        opts = session_options()
         for path, scale in found:
             sess = ort.InferenceSession(
-                path, providers=providers or ["CPUExecutionProvider"])
+                path, sess_options=opts,
+                providers=providers or ["CPUExecutionProvider"])
             self.sessions.append((sess, sess.get_inputs()[0].name, scale, path))
         if self.sessions:
             names = ", ".join(f"{os.path.basename(p)}@{s}" for _, _, s, p in self.sessions)

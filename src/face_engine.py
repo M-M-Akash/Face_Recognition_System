@@ -7,8 +7,10 @@ import logging
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
+from insightface.app.common import Face
 
 from src.face_store import FaceStore
+from src.runtime import insightface_session_options
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +30,13 @@ class FaceEngine:
 
         # 'buffalo_sc' is the small CPU-friendly bundle (SCRFD detector + MobileFaceNet-style recognizer).
         # Use 'buffalo_l' if you have GPU and want higher accuracy.
-        self.app = FaceAnalysis(
-            name="buffalo_sc",
-            providers=providers or ["CPUExecutionProvider"],
-        )
+        # The context manager is what pins the ONNX thread budget — FaceAnalysis
+        # silently ignores a sess_options kwarg, see src/runtime.py.
+        with insightface_session_options():
+            self.app = FaceAnalysis(
+                name="buffalo_sc",
+                providers=providers or ["CPUExecutionProvider"],
+            )
         # ctx_id=-1 forces CPU; set to 0 for GPU
         ctx_id = 0 if providers and "CUDAExecutionProvider" in providers else -1
         self.app.prepare(ctx_id=ctx_id, det_size=det_size)
@@ -73,6 +78,35 @@ class FaceEngine:
         """
         return self.app.get(frame_bgr)
 
+    def detect_faces(self, frame_bgr):
+        """
+        Detection only — the embedding model is not run. Returns Face objects
+        with bbox/kps/det_score but no `normed_embedding`; pass each to embed()
+        for the ones you actually need identified.
+
+        Splitting the two halves of app.get() is the point: detection costs the
+        same regardless of who is in frame, but embedding costs ~7.7 ms *per
+        face* and is pure waste on a track whose identity is already settled.
+        """
+        bboxes, kpss = self.app.det_model.detect(frame_bgr, max_num=0,
+                                                 metric="default")
+        faces = []
+        for i in range(bboxes.shape[0]):
+            faces.append(Face(bbox=bboxes[i, 0:4],
+                              kps=kpss[i] if kpss is not None else None,
+                              det_score=bboxes[i, 4]))
+        return faces
+
+    def embed(self, frame_bgr, face):
+        """
+        Run the recognition model on one detected face, filling its
+        `normed_embedding` in place. `frame_bgr` must be the full-resolution
+        frame the face was detected in — the aligned 112x112 crop is warped
+        from it, not from the detector's downscaled input.
+        """
+        self.app.models["recognition"].get(frame_bgr, face)
+        return face.normed_embedding
+
     def match(self, embedding):
         """
         Match one L2-normalized embedding against the index.
@@ -86,22 +120,6 @@ class FaceEngine:
         if best_sim < self.rec_thresh:
             return "unknown", best_sim
         return self.labels[best_idx], best_sim
-
-    def detect_and_recognize(self, frame_bgr):
-        """
-        Returns list of dicts: [{"bbox": (x1,y1,x2,y2), "label": str, "score": float}, ...]
-        """
-        results = []
-        for f in self.detect(frame_bgr):
-            label, score = self.match(f.normed_embedding)
-            x1, y1, x2, y2 = f.bbox.astype(int)
-            results.append({
-                "bbox": (x1, y1, x2, y2),
-                "label": label,
-                "score": float(score),
-                "det_score": float(f.det_score),
-            })
-        return results
 
     def add_embedding(self, person_name, embedding):
         """Persist one embedding to the store and refresh the in-memory index."""

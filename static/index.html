@@ -21,6 +21,7 @@
   .dot.on { background: var(--ok); }
   .cam img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #000; }
   .controls { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  .fps { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .badge { font-size: 11px; color: var(--warn); border: 1px solid var(--warn);
            border-radius: 99px; padding: 1px 8px; display: none; }
   .toggle { font-size: 11px; padding: 2px 9px; border-radius: 99px; background: transparent;
@@ -144,6 +145,7 @@ async function loadCameras() {
       card.innerHTML = `
         <header><span class="dot"></span><strong>Camera ${c.id}</strong>
         <div class="controls">
+          <span class="fps" title="Frames per second actually processed"></span>
           <span class="badge">ENROLLING</span>
           <button class="toggle rec" title="Recognition on/off">REC</button>
           <button class="toggle power" title="Camera on/off">ON</button>
@@ -152,6 +154,8 @@ async function loadCameras() {
       grid.appendChild(card);
     }
     card.querySelector('.dot').classList.toggle('on', c.connected);
+    card.querySelector('.fps').textContent = c.fps
+      ? `${c.fps.toFixed(1)} fps${c.recognition ? ` · ${c.embeds.toFixed(2)} rec/f` : ''}` : '';
     card.querySelector('.badge').style.display = c.enrolling ? 'inline-block' : 'none';
     const power = card.querySelector('.power');
     power.classList.toggle('on', c.enabled);

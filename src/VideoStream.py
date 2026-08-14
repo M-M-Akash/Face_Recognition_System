@@ -14,6 +14,10 @@ class VideoStream(object):
         (self.grabbed, self.frame) = self.stream.read()
         self.started = False
         self.read_lock = Lock()
+        # Bumped on every grab so consumers can tell a fresh frame from the one
+        # they already processed. Without it, a consumer faster than the camera
+        # silently re-runs inference on an identical buffer.
+        self.seq = 0
 
     def start(self):
         """_Starts a thread that continuously reads frames from the video source and updates the frame buffer. 
@@ -38,6 +42,7 @@ class VideoStream(object):
             (grabbed, frame) = self.stream.read()
             self.read_lock.acquire()
             self.grabbed, self.frame = grabbed, frame
+            self.seq += 1
             self.read_lock.release()
 
     def read(self):
@@ -50,6 +55,14 @@ class VideoStream(object):
         frame = self.frame
         self.read_lock.release()
         return frame
+
+    def read_latest(self):
+        """Latest frame with its sequence number, as (seq, frame). Compare seq
+        against the last one you processed to skip frames you've already seen."""
+        self.read_lock.acquire()
+        seq, frame = self.seq, self.frame
+        self.read_lock.release()
+        return seq, frame
 
     def stop(self):
         """_Stops the thread that is reading frames from the video source._

@@ -1,12 +1,34 @@
 """
 Temporal identity smoothing for video recognition.
 
-Per-frame matching flickers: one borderline frame can flash the wrong name.
-This associates detections across frames into tracks by bbox IOU and only
-displays an identity once it wins a majority vote over a short window.
-Pure bookkeeping — no extra model inference per frame.
+Per-frame matching flickers: one borderline frame can flash the wrong name. This
+associates detections across frames into tracks by bbox IOU, majority-votes the
+label over a short window, and exponentially smooths the displayed box so the
+rectangle stops jittering on a still face.
+
+It also decides *when recognition needs to run at all*, which is where the CPU
+goes. Detection costs the same regardless of who is in frame, but embedding costs
+~7.7 ms per face, and re-embedding a track whose identity is already settled
+learns nothing. So a track runs recognition every frame until it settles, then
+drops to an occasional re-check.
+
+Backing off any earlier would be a mistake worth spelling out: the votes in the
+window *are* recognitions, not frames. Embedding a fresh track once per second
+would stretch confirmation from ~6 frames to ~6 seconds. Every-frame-until-
+settled keeps confirmation latency exactly where it was.
+
+A track un-settles the moment a re-check disagrees with its established identity,
+which is what makes an identity swap converge in ~6 frames instead of ~6 seconds
+when one person steps out of frame and another steps into the same spot.
+
+Pure bookkeeping — no model inference happens in here.
 """
+import time
 from collections import Counter, deque
+
+REVERIFY_S = 1.0      # how often a settled track re-runs recognition
+BBOX_ALPHA = 0.4      # EMA weight for the displayed box; 1.0 disables smoothing
+SNAP_IOU = 0.5        # below this the face moved fast — snap, don't lag behind it
 
 
 def _iou(a, b):
@@ -22,9 +44,23 @@ def _iou(a, b):
 
 class _Track:
     def __init__(self, bbox, window):
-        self.bbox = bbox
-        self.votes = deque(maxlen=window)  # (label, score) per frame
+        self.bbox = tuple(float(v) for v in bbox)      # smoothed, for display
+        self.raw_bbox = self.bbox                      # last raw detection
+        self.embed_bbox = self.bbox                    # raw bbox at last embed
+        self.votes = deque(maxlen=window)              # (label, score) per recognition
         self.misses = 0
+        self.det_score = 0.0
+        self.last_embed = 0.0
+        self.settled = False        # identity established; safe to re-check lazily
+        self.needs_embed = True     # set per frame by associate()
+
+    def observe(self, bbox, alpha):
+        raw = tuple(float(v) for v in bbox)
+        if _iou(raw, self.raw_bbox) < SNAP_IOU:
+            self.bbox = raw
+        else:
+            self.bbox = tuple(s + alpha * (r - s) for s, r in zip(self.bbox, raw))
+        self.raw_bbox = raw
 
 
 class IdentitySmoother:
@@ -32,51 +68,115 @@ class IdentitySmoother:
     One instance per camera.
 
     Args:
-        window: how many recent frames vote per track
+        window: how many recent recognitions vote per track
         min_votes: votes a label needs in the window before it is displayed
         iou_thresh: min IOU to associate a detection with an existing track
         max_misses: drop a track after this many frames without a detection
+        reverify_s: how often a settled track re-runs recognition
+        bbox_alpha: EMA weight for the displayed box (1.0 = raw, no smoothing)
     """
 
-    def __init__(self, window=7, min_votes=4, iou_thresh=0.3, max_misses=5):
+    def __init__(self, window=10, min_votes=6, iou_thresh=0.3, max_misses=5,
+                 reverify_s=REVERIFY_S, bbox_alpha=BBOX_ALPHA):
         self.window = window
         self.min_votes = min_votes
         self.iou_thresh = iou_thresh
         self.max_misses = max_misses
+        self.reverify_s = reverify_s
+        self.bbox_alpha = bbox_alpha
         self.tracks = []
+        self.embeds = 0     # cumulative recognitions recorded; see record()
 
-    def update(self, results):
+    # -- the three-call path: associate -> embed only what needs it -> results --
+
+    def associate(self, detections, now=None):
         """
-        Smooth detect_and_recognize() results in place and return them.
-        The raw per-frame values are preserved as 'raw_label' / 'raw_score'.
+        Match this frame's detections to tracks. `detections` is a sequence of
+        (bbox, det_score). Returns the matched track per detection, in the same
+        order; check `track.needs_embed` to decide whether to run recognition.
         """
+        now = time.monotonic() if now is None else now
         for t in self.tracks:
             t.misses += 1
 
-        claimed = set()
-        for r in results:
+        matched, claimed = [], set()
+        for bbox, det_score in detections:
             best, best_iou = None, self.iou_thresh
             for t in self.tracks:
                 if id(t) in claimed:
                     continue
-                iou = _iou(r["bbox"], t.bbox)
+                iou = _iou(bbox, t.raw_bbox)
                 if iou >= best_iou:
                     best, best_iou = t, iou
             if best is None:
-                best = _Track(r["bbox"], self.window)
+                best = _Track(bbox, self.window)
                 self.tracks.append(best)
             claimed.add(id(best))
 
-            best.bbox = r["bbox"]
             best.misses = 0
-            best.votes.append((r["label"], r["score"]))
-            r["raw_label"], r["raw_score"] = r["label"], r["score"]
-            r["label"], r["score"] = self._verdict(best)
+            best.det_score = float(det_score)
+            best.observe(bbox, self.bbox_alpha)
+            best.needs_embed = self._needs_embed(best, now)
+            matched.append(best)
 
         self.tracks = [t for t in self.tracks if t.misses <= self.max_misses]
-        return results
+        return matched
+
+    def record(self, track, label, score, now=None):
+        """Feed one recognition result into a track's vote window."""
+        now = time.monotonic() if now is None else now
+        self.embeds += 1
+        previous, _ = self._verdict(track)
+        track.votes.append((label, score))
+        track.last_embed = now
+        track.embed_bbox = track.raw_bbox
+
+        if previous != "unknown" and label != previous:
+            # a re-check disagreed with the established identity — go back to
+            # every-frame recognition until the window reasserts itself
+            track.settled = False
+        else:
+            verdict, _ = self._verdict(track)
+            # settled means "there is nothing more to learn by asking again":
+            # either a name has won, or the window is full and stayed unknown
+            # (a stranger standing in frame shouldn't cost full price forever)
+            track.settled = (verdict != "unknown"
+                             or len(track.votes) == self.window)
+
+    def results(self):
+        """Result dicts for the tracks seen in the most recent frame."""
+        out = []
+        for t in self.tracks:
+            if t.misses:
+                continue
+            label, score = self._verdict(t)
+            raw_label, raw_score = t.votes[-1] if t.votes else ("unknown", 0.0)
+            out.append({
+                # smoothed box for drawing; raw box for anything that needs to
+                # be positionally accurate (face crops, anti-spoofing)
+                "bbox": tuple(int(round(v)) for v in t.bbox),
+                "raw_bbox": tuple(int(round(v)) for v in t.raw_bbox),
+                "label": label,
+                "score": score,
+                "raw_label": raw_label,
+                "raw_score": raw_score,
+                "det_score": t.det_score,
+            })
+        return out
+
+    # -- internals --
+
+    def _needs_embed(self, track, now):
+        if not track.settled:
+            return True
+        if now - track.last_embed >= self.reverify_s:
+            return True
+        # the box jumped since we last looked — it may not be the same person
+        return _iou(track.raw_bbox, track.embed_bbox) < SNAP_IOU
 
     def _verdict(self, track):
+        if not track.votes:
+            return "unknown", 0.0
         counts = Counter(label for label, _ in track.votes)
         label, n = counts.most_common(1)[0]
         if label == "unknown" or n < self.min_votes:

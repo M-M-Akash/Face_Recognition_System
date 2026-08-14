@@ -44,6 +44,8 @@ from src.VideoStream import VideoStream
 from src.antispoof import load_antispoof
 from src.enrollment import SAMPLES_PER_POSE, GuidedEnrollment
 from src.face_engine import FaceEngine, draw_results
+from src.pipeline import recognize_frame
+from src.runtime import configure_opencv
 from src.smoother import IdentitySmoother
 
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +63,9 @@ EVENT_COOLDOWN_S = 30   # min seconds between events for the same person+camera
 SPOOF_THRESH = float(os.environ.get("SPOOF_THRESH", "0.5"))  # min P(live) for a clean sighting
 SPOOF_VOTES = 3            # liveness scores (one per frame) collected before an event is written
 SPOOF_PENDING_TTL_S = 5.0  # abandon a half-collected liveness check if the person vanishes
+FPS_ALPHA = 0.2         # smoothing for the per-camera FPS readout
+FRAME_WAIT_S = 0.005    # cameras are live but haven't produced a new frame yet
+IDLE_SLEEP_S = 0.1      # nothing connected — don't spin while retrying
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -85,10 +90,29 @@ class Camera:
         self.idle_published = False
         self.jpeg = _placeholder_jpeg(f"Camera {cam_id}: starting...")
         self.seq = 0
+        self.fps = 0.0          # EMA of processed frames/sec — the number to tune on
+        self.embeds = 0.0       # EMA of recognitions run per frame; see tick()
+        self.last_frame_at = 0.0
+        self.last_seq = -1      # last VideoStream frame we actually processed
 
     def publish(self, jpeg):
         self.jpeg = jpeg
         self.seq += 1
+
+    def tick(self, now, embeds=0):
+        """
+        Record that a frame was processed, for the dashboard readout. `embeds` is
+        how many recognitions that frame actually ran — the number that says
+        whether per-track scheduling is engaging. It should sit near zero while
+        known people stand in view, and rise only while someone is unidentified.
+        """
+        if self.last_frame_at:
+            dt = now - self.last_frame_at
+            if dt > 0:
+                instant = 1.0 / dt
+                self.fps = instant if not self.fps else self.fps + FPS_ALPHA * (instant - self.fps)
+        self.embeds += FPS_ALPHA * (embeds - self.embeds)
+        self.last_frame_at = now
 
     def release(self):
         if self.stream is not None:
@@ -96,6 +120,10 @@ class Camera:
             self.stream.exit()
             self.stream = None
         self.connected = False
+        self.fps = 0.0
+        self.embeds = 0.0
+        self.last_frame_at = 0.0
+        self.last_seq = -1
 
 
 class AppState:
@@ -132,7 +160,7 @@ def _read_frame(cam, now):
         cam.misses = 0
         logger.info(f"Camera {cam.id} connected ({cam.url})")
 
-    frame = cam.stream.read()
+    seq, frame = cam.stream.read_latest()
     if frame is None:
         cam.misses += 1
         if cam.misses >= MAX_MISSED_READS:
@@ -141,6 +169,11 @@ def _read_frame(cam, now):
             cam.publish(_placeholder_jpeg(f"Camera {cam.id}: disconnected"))
         return None
     cam.misses = 0
+    if seq == cam.last_seq:
+        # the grabber hasn't produced a new frame since our last pass; running
+        # inference again on the same buffer would burn cores for no new result
+        return None
+    cam.last_seq = seq
     return frame
 
 
@@ -175,10 +208,15 @@ def _emit_events(cam, frame, results, now):
         if now - state.last_event_at.get(key, 0.0) < EVENT_COOLDOWN_S:
             continue
 
+        # the raw detection, not the EMA-smoothed display box: the snapshot and
+        # the anti-spoofing crop want positional accuracy, and scaled_crop's
+        # geometry is what SPOOF_THRESH was measured against
+        bbox = r.get("raw_bbox", r["bbox"])
+
         if not state.antispoof.available:
             state.last_event_at[key] = now
             state.engine.store.add_event(person, cam.id, r["score"],
-                                         _face_snapshot(frame, r["bbox"]))
+                                         _face_snapshot(frame, bbox))
             logger.info(f"Sighting: {person} on camera {cam.id} "
                         f"(similarity {r['score']:.2f})")
             continue
@@ -186,10 +224,10 @@ def _emit_events(cam, frame, results, now):
         pending = state.pending_liveness.get(key)
         if pending is None:
             pending = state.pending_liveness[key] = {
-                "scores": [], "snapshot": _face_snapshot(frame, r["bbox"]),
+                "scores": [], "snapshot": _face_snapshot(frame, bbox),
                 "similarity": r["score"], "last": now}
         pending["last"] = now
-        score = state.antispoof.score(frame, r["bbox"])
+        score = state.antispoof.score(frame, bbox)
         if score is not None:
             pending["scores"].append(score)
         if len(pending["scores"]) < SPOOF_VOTES:
@@ -253,6 +291,7 @@ def _process_loop():
                 continue
             got_frame = True
 
+            embeds = 0
             session = state.enroll
             enrolling = (session is not None and session.state == "running"
                          and session.cam_id == cam.id)
@@ -265,12 +304,16 @@ def _process_loop():
                     logger.info(message)
                     cam.smoother = IdentitySmoother()  # drop stale tracks
             elif cam.recognition and not state.paused:
-                results = cam.smoother.update(state.engine.detect_and_recognize(frame))
+                before = cam.smoother.embeds
+                results = recognize_frame(state.engine, cam.smoother, frame, now)
+                embeds = cam.smoother.embeds - before
                 _emit_events(cam, frame, results, now)  # snapshot before boxes are drawn
                 draw_results(frame, results)
             else:
                 tag = "recognition paused" if state.paused else "recognition off"
                 cv2.putText(frame, tag, (10, 25), FONT, 0.6, (140, 140, 140), 2)
+
+            cam.tick(now, embeds)
 
             # encoding is demand-driven: skip it when nobody is watching
             if cam.viewers > 0 or enrolling:
@@ -279,7 +322,12 @@ def _process_loop():
                     cam.publish(buf.tobytes())
 
         if not got_frame:
-            time.sleep(0.1)
+            # Distinguish "cameras are live, just haven't produced a new frame
+            # yet" from "nothing is connected". The first wants a short wait so
+            # we pick the next frame up promptly; the second wants a long one so
+            # reconnect attempts don't spin a core.
+            live = any(c.enabled and c.stream is not None for c in state.cameras.values())
+            time.sleep(FRAME_WAIT_S if live else IDLE_SLEEP_S)
 
 
 def _mjpeg_stream(cam):
@@ -308,6 +356,8 @@ def _camera_payload(cam):
         "enabled": cam.enabled,
         "recognition": cam.recognition,
         "viewers": cam.viewers,
+        "fps": round(cam.fps, 1),
+        "embeds": round(cam.embeds, 2),
         "enrolling": bool(session and session.state == "running" and session.cam_id == cam.id),
     }
 
@@ -338,6 +388,7 @@ app = FastAPI(title="Face Recognition")
 def startup():
     with open(CAMERA_URLS_FILE) as f:
         urls = json.load(f)
+    configure_opencv()   # keep OpenCV's pool inside the same budget as ORT's
     state.engine = FaceEngine(providers=PROVIDERS)
     state.antispoof = load_antispoof(providers=PROVIDERS)
     store = state.engine.store

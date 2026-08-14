@@ -11,6 +11,8 @@ import cv2
 
 from src.VideoStream import VideoStream
 from src.face_engine import FaceEngine, draw_results
+from src.pipeline import recognize_frame
+from src.runtime import configure_opencv
 from src.smoother import IdentitySmoother
 
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +24,7 @@ RELOAD_CHECK_S = 2.0  # how often to poll the store for new enrollments
 
 
 def run(camera_urls):
+    configure_opencv()
     engine = FaceEngine(providers=providers)
     cameras = [(i, VideoStream(url).start(), IdentitySmoother())
                for i, url in enumerate(camera_urls)]
@@ -44,7 +47,7 @@ def run(camera_urls):
                     cv2.destroyWindow(f"Camera {i+1}")
                     continue
 
-                results = smoother.update(engine.detect_and_recognize(frame))
+                results = recognize_frame(engine, smoother, frame, now)
                 draw_results(frame, results)
               
                 cv2.imshow(f"Camera {i+1}", frame)
