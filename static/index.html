@@ -38,6 +38,10 @@
   .toggle.blocked { border-color: var(--bad); color: var(--bad); opacity: 1; }
   .spoof-badge { color: var(--bad); border-color: var(--bad); }
   .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  /* Enrollment is the one panel someone stands in front of and interacts with,
+     so it gets the width the sightings log used to occupy. */
+  .enroll-panel { grid-column: span 2; }
+  @media (max-width: 800px) { .enroll-panel { grid-column: span 1; } }
   .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
   input, select, button { font: inherit; color: inherit; }
   input, select { background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
@@ -48,14 +52,20 @@
   #pause-btn.paused { border-color: var(--bad); color: var(--bad); }
   /* Enrollment ring. The camera sits in a circular mask inside a dial of ticks;
      each tick belongs to one of the three real pose bins and lights as that bin
-     fills, so the dial renders actual captured state rather than decoration. */
-  .ring-wrap { position: relative; width: 260px; height: 260px; margin: 12px auto 4px; }
+     fills, so the dial renders actual captured state rather than decoration.
+     Sized in % of the wrapper (not px) so the whole dial scales with it — the
+     person being enrolled needs to actually see their own face. */
+  .ring-wrap { position: relative; width: min(520px, 100%); aspect-ratio: 1;
+               margin: 14px auto 6px; }
+  /* the ring is the focus while enrolling, so centre what sits under it */
+  #enroll-live { text-align: center; }
+  #enroll-live #warning { max-width: 46ch; margin: 0 auto; }
   /* Not mirrored: the server draws the enrollment overlay text onto the frame,
      so a CSS flip would render that text backwards. Scaled up because that same
-     overlay is sized for a 640px frame and is illegible clutter at 208px — the
-     zoom pushes it outside the circle, leaving just the face. The instruction
+     overlay is sized for a 640px frame and is illegible clutter inside the
+     circle — the zoom pushes it outside, leaving just the face. The instruction
      and counts are rendered as real text below the ring anyway. */
-  .ring-wrap .video-clip { position: absolute; left: 26px; top: 26px; width: 208px; height: 208px;
+  .ring-wrap .video-clip { position: absolute; left: 10%; top: 10%; width: 80%; height: 80%;
                            border-radius: 50%; overflow: hidden; background: #000; }
   .ring-wrap img { width: 100%; height: 100%; object-fit: cover; transform: scale(1.7); }
   #ring { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -83,9 +93,6 @@
   .event img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; background: #000; flex: none; }
   .event .who { min-width: 0; }
   .event .time { margin-left: auto; flex: none; font-size: 12px; }
-  .event.spoof { background: rgba(255, 93, 93, .07); }
-  .event.spoof img { outline: 2px solid var(--bad); }
-  .spoof-tag { color: var(--bad); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -97,7 +104,7 @@
 <div id="grid"></div>
 
 <div class="panels">
-  <div class="panel">
+  <div class="panel enroll-panel">
     <h2>Enroll a person</h2>
     <div id="enroll-form">
       <input id="name" placeholder="Person's name" autocomplete="off">
@@ -129,11 +136,6 @@
       <button class="secondary" onclick="cancelEnroll()" style="margin-top:10px">Cancel</button>
     </div>
     <div id="message"></div>
-  </div>
-
-  <div class="panel">
-    <h2>Recent sightings</h2>
-    <div id="events"></div>
   </div>
 
   <div class="panel">
@@ -317,23 +319,6 @@ async function loadCaptures() {
     : '<p class="muted">No photos taken yet</p>';
 }
 
-async function loadEvents() {
-  const evs = await (await fetch('/api/events?limit=30')).json();
-  $('#events').innerHTML = evs.length
-    ? evs.map(e => {
-      const liveTag = e.liveness == null ? ''
-        : e.live ? ` · live ${e.liveness.toFixed(2)}`
-        : ` · <span class="spoof-tag">SPOOF? ${e.liveness.toFixed(2)}</span>`;
-      return `
-      <div class="event${e.live === false ? ' spoof' : ''}">
-        <div class="who"><strong>${e.person}</strong>
-          <span class="muted">camera ${e.camera} · ${e.similarity.toFixed(2)}${liveTag}</span></div>
-        <span class="muted time">${fmtTime(e.created_at)}</span>
-      </div>`;
-    }).join('')
-    : '<p class="muted">No sightings yet</p>';
-}
-
 async function loadPeople() {
   const people = await (await fetch('/api/people')).json();
   $('#people-body').innerHTML = people.length
@@ -470,13 +455,11 @@ async function pollEnroll() {
 
 loadCameras();
 loadPeople();
-loadEvents();
 loadCaptures();
 pollEnroll();
 // faster than the other panels: this drives the SPOOF badge and whether PHOTO is
 // clickable, which should not lag several seconds behind the red box on the video
 setInterval(loadCameras, 1500);
-setInterval(loadEvents, 5000);
 setInterval(loadCaptures, 5000);
 setInterval(pollEnroll, 600);
 </script>
