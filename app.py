@@ -34,6 +34,8 @@ state is in-process:
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
 import logging
+import os
+import resource
 import threading
 import time
 from pathlib import Path
@@ -48,10 +50,10 @@ from pydantic import BaseModel
 from src.VideoStream import VideoStream
 from src.antispoof import load_antispoof
 from src.config import CONFIG_PATH, config
-from src.enrollment import SAMPLES_PER_POSE, GuidedEnrollment
+from src.enrollment import POSES, SAMPLES_PER_POSE, GuidedEnrollment
 from src.face_engine import FaceEngine, draw_results
 from src.pipeline import recognize_frame
-from src.runtime import configure_opencv
+from src.runtime import configure_opencv, thread_budget
 from src.smoother import IdentitySmoother
 
 logging.basicConfig(level=logging.INFO)
@@ -127,12 +129,53 @@ class Camera:
         self.last_seq = -1      # last VideoStream frame we actually processed
         self.capture = None     # pending CaptureRequest, serviced by the worker
         self.spoof = False      # latest frame showed a suspected presentation attack
+        # -- diagnostics: where the milliseconds and the dropped frames go --
+        self.capture_fps = 0.0  # EMA of frames the grabber produced per second
+        self.dropped = 0.0      # EMA of frames produced but never processed
+        self.latency_ms = 0.0   # EMA of grab -> publish age of the displayed frame
+        self.stream_fps = 0.0   # EMA of frames actually yielded to viewers
+        self.stage_ms = {k: 0.0 for k in
+                         ("detect", "embed", "liveness", "encode", "other")}
+        self._last_capture_seq = -1
+        self._last_capture_at = 0.0
+        self._last_yield_at = 0.0
 
     def publish(self, jpeg):
         self.jpeg = jpeg
         self.seq += 1
 
-    def tick(self, now, embeds=0):
+    @staticmethod
+    def _ema(current, sample):
+        return sample if not current else current + FPS_ALPHA * (sample - current)
+
+    def observe_capture(self, seq, now):
+        """Record what the GRABBER produced, whether or not we processed it.
+
+        Comparing this against `fps` is the whole diagnosis: a low capture_fps
+        means the camera or the decode is short, while a healthy capture_fps with
+        a low `fps` and a rising `dropped` means the inference loop is.
+        """
+        if self._last_capture_seq >= 0 and now > self._last_capture_at:
+            produced = seq - self._last_capture_seq
+            self.capture_fps = self._ema(self.capture_fps,
+                                         produced / (now - self._last_capture_at))
+            # everything the grabber made since our last pass, bar the one we took
+            self.dropped = self._ema(self.dropped, max(0, produced - 1))
+        self._last_capture_seq = seq
+        self._last_capture_at = now
+
+    def observe_yield(self, now):
+        """A frame actually went out to a viewer. Below the publish rate means
+        the client is not keeping up, which no server-side tuning will fix.
+
+        Aggregated across viewers, so with N of them it reads roughly N x the
+        frame rate — compare against `viewers`, reported beside it.
+        """
+        if self._last_yield_at and now > self._last_yield_at:
+            self.stream_fps = self._ema(self.stream_fps, 1.0 / (now - self._last_yield_at))
+        self._last_yield_at = now
+
+    def tick(self, now, embeds=0, stages=None, latency_ms=None):
         """
         Record that a frame was processed, for the dashboard readout. `embeds` is
         how many recognitions that frame actually ran — the number that says
@@ -142,9 +185,13 @@ class Camera:
         if self.last_frame_at:
             dt = now - self.last_frame_at
             if dt > 0:
-                instant = 1.0 / dt
-                self.fps = instant if not self.fps else self.fps + FPS_ALPHA * (instant - self.fps)
+                self.fps = self._ema(self.fps, 1.0 / dt)
         self.embeds += FPS_ALPHA * (embeds - self.embeds)
+        if stages:
+            for name, ms in stages.items():
+                self.stage_ms[name] = self._ema(self.stage_ms[name], ms)
+        if latency_ms is not None:
+            self.latency_ms = self._ema(self.latency_ms, latency_ms)
         self.last_frame_at = now
 
     def release(self):
@@ -157,6 +204,10 @@ class Camera:
         self.embeds = 0.0
         self.last_frame_at = 0.0
         self.last_seq = -1
+        self.capture_fps = self.dropped = self.latency_ms = self.stream_fps = 0.0
+        self.stage_ms = {k: 0.0 for k in self.stage_ms}
+        self._last_capture_seq = -1
+        self._last_capture_at = self._last_yield_at = 0.0
         if self.capture is not None:
             self.capture.resolve(error=f"Camera {self.id} was stopped")
             self.capture = None
@@ -174,6 +225,21 @@ class AppState:
         self.last_event_at = {}       # (cam_id, person) -> monotonic-ish timestamp
         self.stop = threading.Event()
         self.thread = None
+        # Cores this process is actually burning. Frame rates and stage timings
+        # can all look healthy while CPU starves whatever renders the dashboard,
+        # which is invisible from inside the server unless it's measured.
+        self.cpu_cores = 0.0
+        self._cpu_mark = None
+
+    def sample_cpu(self):
+        used = resource.getrusage(resource.RUSAGE_SELF)
+        cpu, wall = used.ru_utime + used.ru_stime, time.monotonic()
+        if self._cpu_mark:
+            prev_cpu, prev_wall = self._cpu_mark
+            elapsed = wall - prev_wall
+            if elapsed > 0:
+                self.cpu_cores = (cpu - prev_cpu) / elapsed
+        self._cpu_mark = (cpu, wall)
 
 
 state = AppState()
@@ -195,7 +261,7 @@ def _read_frame(cam, now):
         cam.misses = 0
         logger.info(f"Camera {cam.id} connected ({cam.url})")
 
-    seq, frame = cam.stream.read_latest()
+    seq, stamp, frame = cam.stream.read_latest()
     if frame is None:
         cam.misses += 1
         if cam.misses >= MAX_MISSED_READS:
@@ -208,8 +274,11 @@ def _read_frame(cam, now):
         # the grabber hasn't produced a new frame since our last pass; running
         # inference again on the same buffer would burn cores for no new result
         return None
+    # measured before the early return above would have hidden it: this counts
+    # what the camera produced, including frames we are about to skip past
+    cam.observe_capture(seq, time.monotonic())
     cam.last_seq = seq
-    return frame
+    return frame, stamp
 
 
 def _safe_name(person):
@@ -329,6 +398,7 @@ def _process_loop():
         if now - last_reload >= RELOAD_CHECK_S:
             if state.engine.maybe_reload():
                 logger.info("Store changed — reloaded face index")
+            state.sample_cpu()
             last_reload = now
 
         got_frame = False
@@ -344,17 +414,22 @@ def _process_loop():
                 continue
             cam.idle_published = False
 
-            frame = _read_frame(cam, now)
-            if frame is None:
+            grabbed = _read_frame(cam, now)
+            if grabbed is None:
                 continue
+            frame, stamp = grabbed
             got_frame = True
+            frame_start = time.perf_counter()
 
             embeds = 0
+            stages = {}
             session = state.enroll
             enrolling = (session is not None and session.state == "running"
                          and session.cam_id == cam.id)
             if enrolling:
+                t0 = time.perf_counter()
                 faces = state.engine.detect(frame)
+                stages["detect"] = (time.perf_counter() - t0) * 1000
                 info = session.step(frame, faces)
                 _draw_enroll_overlay(frame, session, info)
                 if session.state in ("complete", "timeout"):
@@ -364,7 +439,7 @@ def _process_loop():
             elif cam.recognition and not state.paused:
                 before = cam.smoother.embeds
                 results = recognize_frame(state.engine, cam.smoother, frame, now,
-                                          antispoof=state.antispoof)
+                                          antispoof=state.antispoof, timings=stages)
                 embeds = cam.smoother.embeds - before
                 cam.spoof = any(not r["live"] for r in results)
                 _emit_events(cam, results, now)
@@ -375,13 +450,20 @@ def _process_loop():
                 tag = "recognition paused" if state.paused else "recognition off"
                 cv2.putText(frame, tag, (10, 25), FONT, 0.6, (140, 140, 140), 2)
 
-            cam.tick(now, embeds)
-
             # encoding is demand-driven: skip it when nobody is watching
             if cam.viewers > 0 or enrolling:
+                t0 = time.perf_counter()
                 ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                stages["encode"] = (time.perf_counter() - t0) * 1000
                 if ok:
                     cam.publish(buf.tobytes())
+
+            # whatever the named stages didn't account for: drawing, event
+            # emission, smoothing, frame copies. If this is large, the cost is
+            # somewhere we aren't yet measuring.
+            total_ms = (time.perf_counter() - frame_start) * 1000
+            stages["other"] = max(0.0, total_ms - sum(stages.values()))
+            cam.tick(now, embeds, stages, (time.monotonic() - stamp) * 1000)
 
         if not got_frame:
             # Distinguish "cameras are live, just haven't produced a new frame
@@ -401,6 +483,10 @@ def _mjpeg_stream(cam):
             if cam.seq != last_seq:
                 last_seq = cam.seq
                 jpg = cam.jpeg
+                # A yield only completes once the client has taken the bytes, so
+                # a stream_fps below the publish rate means the viewer is the
+                # bottleneck, not the pipeline.
+                cam.observe_yield(time.monotonic())
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                        + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
             else:
@@ -408,6 +494,23 @@ def _mjpeg_stream(cam):
     finally:
         with state.viewer_lock:
             cam.viewers -= 1
+
+
+def _diagnostics(cam):
+    """Where this camera's milliseconds and dropped frames go. See
+    GET /api/diagnostics for how to read it."""
+    stages = {k: round(v, 2) for k, v in cam.stage_ms.items()}
+    return {
+        "capture_fps": round(cam.capture_fps, 1),
+        "process_fps": round(cam.fps, 1),
+        "stream_fps": round(cam.stream_fps, 1),
+        "dropped_per_frame": round(cam.dropped, 2),
+        "latency_ms": round(cam.latency_ms, 1),
+        "stage_ms": stages,
+        "frame_ms": round(sum(stages.values()), 2),
+        "recognitions_per_frame": round(cam.embeds, 2),
+        "viewers": cam.viewers,
+    }
 
 
 def _camera_payload(cam):
@@ -421,6 +524,7 @@ def _camera_payload(cam):
         "fps": round(cam.fps, 1),
         "embeds": round(cam.embeds, 2),
         "spoof": cam.spoof,
+        "diag": _diagnostics(cam),
         "enrolling": bool(session and session.state == "running" and session.cam_id == cam.id),
     }
 
@@ -438,6 +542,11 @@ def _enroll_payload():
         "needed": SAMPLES_PER_POSE,
         "instruction": session.last_instruction,
         "problem": session.last_problem,
+        # head aim for the enrollment ring; null when no face is in view
+        "yaw": session.last_yaw,
+        "pitch": session.last_pitch,
+        "pose": session.last_pose,
+        "poses": [pose for pose, _ in POSES],
         "warning": session.warning,
         "message": session.message,
         "saved": session.saved,
@@ -489,8 +598,12 @@ def index():
 
 
 @app.get("/api/cameras")
-def cameras():
+def cameras():  # noqa: D401 — payload also carries process-wide cpu for the UI
+    cores = os.cpu_count() or 1
     return {"paused": state.paused,
+            "cpu": {"cores_used": round(state.cpu_cores, 2),
+                    "cores_available": cores,
+                    "saturated": state.cpu_cores > cores * 0.85},
             "cameras": [_camera_payload(cam) for cam in state.cameras.values()]}
 
 
@@ -627,6 +740,38 @@ def capture(req: CaptureCommand):
     if request.error:
         raise HTTPException(409, request.error)
     return request.payload
+
+
+@app.get("/api/diagnostics")
+def diagnostics():
+    """Snapshot this while the lag is happening — that is the point of it.
+
+    How to read it, per camera:
+      capture_fps low (<15)                  -> the camera or its decode is short
+      capture_fps ok, process_fps low,
+        dropped_per_frame high               -> the inference loop is the bottleneck
+      process_fps ok, latency_ms climbing    -> frames are queueing before us
+      process_fps ok, stream_fps much lower  -> the VIEWER is behind, not the server
+      stage_ms dominated by one entry        -> that stage is where to spend effort
+
+    `other` is whatever the named stages didn't account for (drawing, events,
+    smoothing). If it is large, the cost is somewhere not yet instrumented.
+    """
+    cores = os.cpu_count() or 1
+    return {
+        "paused": state.paused,
+        "threads": {"ort": thread_budget(), "workers": 1,
+                    "spin_wait": config.runtime.spin_wait},
+        # Cores this process burns, against what the machine has. If these are
+        # close, the server may be fine while starving the browser that renders
+        # the dashboard — which looks identical to the server being dead.
+        "cpu": {"cores_used": round(state.cpu_cores, 2), "cores_available": cores,
+                "saturated": state.cpu_cores > cores * 0.85},
+        "antispoof": state.antispoof.available if state.antispoof else False,
+        "det_size": config.detection.det_size,
+        "gallery": len(state.engine.labels) if state.engine else 0,
+        "cameras": {cam.id: _diagnostics(cam) for cam in state.cameras.values()},
+    }
 
 
 @app.get("/api/captures")

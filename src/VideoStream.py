@@ -1,5 +1,7 @@
-import cv2
+import time
 from threading import Thread, Lock
+
+import cv2
 
 
 class VideoStream(object):
@@ -18,6 +20,11 @@ class VideoStream(object):
         # they already processed. Without it, a consumer faster than the camera
         # silently re-runs inference on an identical buffer.
         self.seq = 0
+        # When the current frame was grabbed. Lets a consumer measure how stale
+        # the frame it is about to show actually is — the difference between
+        # "we are slow" and "we are showing old frames", which look identical
+        # from a frame-rate counter alone.
+        self.stamp = time.monotonic()
 
     def start(self):
         """_Starts a thread that continuously reads frames from the video source and updates the frame buffer. 
@@ -40,9 +47,11 @@ class VideoStream(object):
         """
         while self.started:
             (grabbed, frame) = self.stream.read()
+            now = time.monotonic()
             self.read_lock.acquire()
             self.grabbed, self.frame = grabbed, frame
             self.seq += 1
+            self.stamp = now
             self.read_lock.release()
 
     def read(self):
@@ -57,12 +66,13 @@ class VideoStream(object):
         return frame
 
     def read_latest(self):
-        """Latest frame with its sequence number, as (seq, frame). Compare seq
-        against the last one you processed to skip frames you've already seen."""
+        """Latest frame as (seq, stamp, frame). Compare seq against the last one
+        you processed to skip frames you've already seen, and to count the ones
+        you missed; `stamp` is when it was grabbed, for measuring staleness."""
         self.read_lock.acquire()
-        seq, frame = self.seq, self.frame
+        seq, stamp, frame = self.seq, self.stamp, self.frame
         self.read_lock.release()
-        return seq, frame
+        return seq, stamp, frame
 
     def stop(self):
         """_Stops the thread that is reading frames from the video source._

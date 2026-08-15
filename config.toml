@@ -16,10 +16,30 @@
 # requirements.txt — installing both breaks the provider lookup.
 gpu = false
 
-# ONNX Runtime threads per model. 0 auto-detects *physical* cores, which is
-# these models stop scaling past that, and counting
-# hyperthreads measured slower.
+# Threads per model, for ONNX Runtime AND OpenCV. 0 auto-detects **physical**
+# cores, which is the right answer on nearly every machine.
+#
+# This is NOT the thread count your system monitor shows — that counts
+# hyperthreads, which share execution units and add no compute for these models.
+# Measured on this 2-physical-core box: threads = 4 was SLOWER per frame than
+# threads = 0 (35.7 ms against 26.0) and burned twice the CPU (1.5 cores against
+# 0.75), because four intra-op threads thrash over two physical cores.
+#
+# It also does NOT affect camera frame rate. Capture rate is set by the camera's
+# exposure time — in dim light auto-exposure stretches each frame to 60 ms, which
+# is 16.7 fps, and no thread setting changes that (measured identical at 1, 2, 4
+# and auto). If fps is low, look at the light, not at this.
+#
+# Leave it at 0 unless you have measured a reason not to.
 threads = 0
+
+# Let ONNX Runtime's threads spin while waiting for work. Leave this false.
+# Spinning helps only when inference runs back-to-back with no idle time; this
+# app does one detection then waits for the next frame, so spinning just burns
+# cores through the gap — measured 1.55 cores against 1.06 for identical frame
+# rate and identical latency. Set true only for a genuinely throughput-bound,
+# non-interactive batch deployment.
+spin_wait = false
 
 
 [cameras]

@@ -28,6 +28,17 @@ SAMPLE_COOLDOWN = config.enrollment.sample_cooldown_s
 CENTER_MAX = 0.12
 SIDE_MIN = 0.25
 
+# Generic 3D face, in mm, ordered like the detector's 5 keypoints. Only the
+# shape matters, not the scale — solvePnP recovers rotation regardless. The nose
+# protruding on Z is what makes the pose observable at all from five points.
+_FACE_3D = np.array([
+    [-30.0,  32.0, -30.0],    # left eye
+    [30.0,  32.0, -30.0],     # right eye
+    [0.0,   0.0,   0.0],      # nose tip
+    [-28.0, -28.0, -25.0],    # left mouth corner
+    [28.0, -28.0, -25.0],     # right mouth corner
+], dtype=np.float64)
+
 POSES = [
     ("center", "Look straight at the camera"),
     ("left", "Turn your head slowly to your LEFT"),
@@ -52,6 +63,45 @@ def estimate_yaw(kps):
         return 0.0
     eye_mid_x = (left_eye[0] + right_eye[0]) / 2.0
     return float((nose[0] - eye_mid_x) / inter_eye)
+
+
+def head_pose(kps, frame_w, frame_h):
+    """
+    Head orientation in degrees as (yaw, pitch) — the direction the face points.
+    Positive yaw = the person's own left, positive pitch = chin up, matching
+    estimate_yaw's sign convention.
+
+    Purely for UI feedback: the enrollment ring shows where the head is aimed so
+    the operator gets a signal every frame instead of only when a sample lands.
+    It does NOT decide which pose bin a sample goes in — estimate_yaw still does
+    that, so capture behaviour is unchanged.
+
+    Costs ~0.04 ms. Returns None if the solve fails.
+
+    SOLVEPNP_SQPNP is not optional: the default ITERATIVE method needs at least
+    6 points and the detector gives us 5.
+    """
+    focal = float(frame_w)
+    camera = np.array([[focal, 0, frame_w / 2.0],
+                       [0, focal, frame_h / 2.0],
+                       [0, 0, 1]], dtype=np.float64)
+    points = np.asarray(kps, dtype=np.float64).reshape(5, 2)
+    ok, rvec, _ = cv2.solvePnP(_FACE_3D, points, camera, None,
+                               flags=cv2.SOLVEPNP_SQPNP)
+    if not ok:
+        return None
+    rotation, _ = cv2.Rodrigues(rvec)
+    # The model's nose sits at max +Z, so +Z is the way the face points in model
+    # space. A face looking into the lens therefore maps to -Z in camera space,
+    # which is why the angles are measured against -forward: taking them against
+    # +forward reports ~180 deg for a frontal face.
+    forward = -(rotation @ np.array([0.0, 0.0, 1.0]))
+    # Negated so positive yaw means the person's own left, matching estimate_yaw.
+    # Verified against real detector keypoints, not just synthetic ones: a
+    # profile frame that estimate_yaw scores -0.31 reads about -32 deg here.
+    yaw = -float(np.degrees(np.arctan2(forward[0], forward[2])))
+    pitch = float(np.degrees(np.arcsin(np.clip(forward[1], -1.0, 1.0))))
+    return yaw, pitch
 
 
 def pose_of(yaw):
@@ -110,6 +160,10 @@ class GuidedEnrollment:
         self.message = ""
         self.last_instruction = ""
         self.last_problem = None
+        # latest head aim, for the enrollment ring (UI only)
+        self.last_yaw = None
+        self.last_pitch = None
+        self.last_pose = None
         self._checked_duplicate = False
         self._finished = False
 
@@ -126,7 +180,8 @@ class GuidedEnrollment:
         """Process one frame. Returns a dict for UI feedback."""
         info = {"state": self.state, "counts": self.counts(), "instruction": "",
                 "problem": None, "bbox": None, "accepted": False,
-                "warning": self.warning}
+                "warning": self.warning, "yaw": None, "pitch": None,
+                "pose": None}
         if self.state != "running":
             return info
 
@@ -146,6 +201,14 @@ class GuidedEnrollment:
         accepted = False
         if face is not None:
             info["bbox"] = tuple(int(v) for v in face.bbox)
+            # UI feedback only — the ring marker. Never gates a sample.
+            h, w = frame.shape[:2]
+            aim = head_pose(face.kps, w, h)
+            if aim is not None:
+                info["yaw"], info["pitch"] = aim
+            # which bin estimate_yaw currently puts the head in — reported so the
+            # ring can highlight it, still computed the same way capture uses
+            info["pose"] = pose_of(estimate_yaw(face.kps))
         if face is not None and problem is None:
             pose = pose_of(estimate_yaw(face.kps))
             now = time.time()
@@ -178,6 +241,8 @@ class GuidedEnrollment:
 
         self.last_instruction = instruction
         self.last_problem = problem
+        self.last_yaw, self.last_pitch = info["yaw"], info["pitch"]
+        self.last_pose = info["pose"]
         info.update(state=self.state, counts=self.counts(), instruction=instruction,
                     problem=problem, accepted=accepted, warning=self.warning)
         return info

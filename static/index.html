@@ -22,6 +22,13 @@
   .cam img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #000; }
   .controls { margin-left: auto; display: flex; gap: 6px; align-items: center; }
   .fps { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .diag-btn { font-family: monospace; width: 22px; padding: 2px 0; }
+  .diag { display: none; padding: 8px 10px; border-top: 1px solid var(--line);
+          font-size: 12px; font-variant-numeric: tabular-nums; }
+  .diag-row { color: var(--muted); margin: 2px 0; }
+  .diag-row b { color: var(--text); font-weight: 500; }
+  .diag-row .hot { color: var(--warn); }
+  .diag-row.warnrow { color: var(--bad); }
   .badge { font-size: 11px; color: var(--warn); border: 1px solid var(--warn);
            border-radius: 99px; padding: 1px 8px; display: none; }
   .toggle { font-size: 11px; padding: 2px 9px; border-radius: 99px; background: transparent;
@@ -39,11 +46,28 @@
   button.secondary { background: transparent; border: 1px solid var(--line); color: var(--muted); }
   #pause-btn { margin-left: auto; }
   #pause-btn.paused { border-color: var(--bad); color: var(--bad); }
-  .pose { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
-  .pose .label { width: 56px; color: var(--muted); }
-  .pose .count { width: 40px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .bar { background: var(--bg); border: 1px solid var(--line); border-radius: 99px; height: 10px; flex: 1; overflow: hidden; }
-  .bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .25s; }
+  /* Enrollment ring. The camera sits in a circular mask inside a dial of ticks;
+     each tick belongs to one of the three real pose bins and lights as that bin
+     fills, so the dial renders actual captured state rather than decoration. */
+  .ring-wrap { position: relative; width: 260px; height: 260px; margin: 12px auto 4px; }
+  /* Not mirrored: the server draws the enrollment overlay text onto the frame,
+     so a CSS flip would render that text backwards. Scaled up because that same
+     overlay is sized for a 640px frame and is illegible clutter at 208px — the
+     zoom pushes it outside the circle, leaving just the face. The instruction
+     and counts are rendered as real text below the ring anyway. */
+  .ring-wrap .video-clip { position: absolute; left: 26px; top: 26px; width: 208px; height: 208px;
+                           border-radius: 50%; overflow: hidden; background: #000; }
+  .ring-wrap img { width: 100%; height: 100%; object-fit: cover; transform: scale(1.7); }
+  #ring { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #ring line { stroke: var(--line); stroke-width: 3; stroke-linecap: round; transition: stroke .2s; }
+  #ring line.lit { stroke: var(--ok); }
+  #ring line.active { stroke: var(--accent); }
+  #aim { fill: var(--accent); opacity: 0; transition: opacity .2s; }
+  #aim.on { opacity: 1; }
+  #pose-counts { display: flex; gap: 14px; justify-content: center; margin: 4px 0 2px; }
+  .pose-count { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .pose-count.done .count { color: var(--ok); }
+  .pose-count.active { color: var(--text); }
   #instruction { font-size: 16px; font-weight: 600; margin: 10px 0 2px; min-height: 24px; }
   #problem { color: var(--warn); min-height: 21px; }
   #warning { color: var(--bad); }
@@ -84,11 +108,23 @@
     </div>
     <div id="enroll-live" style="display:none">
       <div id="enroll-title" class="muted"></div>
+      <div class="ring-wrap">
+        <div class="video-clip"><img id="enroll-video" alt=""></div>
+        <svg id="ring" viewBox="0 0 260 260" aria-hidden="true">
+          <g id="ticks"></g>
+          <circle id="aim" cx="130" cy="130" r="5"></circle>
+        </svg>
+      </div>
       <div id="instruction"></div>
       <div id="problem"></div>
-      <div class="pose" id="pose-center"><span class="label">center</span><div class="bar"><i></i></div><span class="count"></span></div>
-      <div class="pose" id="pose-left"><span class="label">left</span><div class="bar"><i></i></div><span class="count"></span></div>
-      <div class="pose" id="pose-right"><span class="label">right</span><div class="bar"><i></i></div><span class="count"></span></div>
+      <!-- Numeric progress stays as text beside the ring: a purely graphical
+           indicator would be unreadable to a screen reader, and failing to
+           enroll means being unable to be marked present. -->
+      <div id="pose-counts" role="status" aria-live="polite">
+        <span class="pose-count" id="pose-center"><span class="label">center</span> <span class="count"></span></span>
+        <span class="pose-count" id="pose-left"><span class="label">left</span> <span class="count"></span></span>
+        <span class="pose-count" id="pose-right"><span class="label">right</span> <span class="count"></span></span>
+      </div>
       <div id="warning"></div>
       <button class="secondary" onclick="cancelEnroll()" style="margin-top:10px">Cancel</button>
     </div>
@@ -140,8 +176,44 @@ function renderPause(paused) {
   };
 }
 
+// Which cameras have the diagnostics panel open. The point of this panel is to
+// tell a server bottleneck from a client one: if process_fps is healthy but
+// stream_fps is well below it, the browser is behind and no server-side tuning
+// will help.
+const showDiag = new Set();
+
+let lastCpu = null;      // process-wide, shared by every camera's panel
+
+function renderDiag(d) {
+  const s = d.stage_ms || {};
+  const worst = Object.entries(s).sort((a, b) => b[1] - a[1])[0];
+  const bar = Object.entries(s).filter(([, v]) => v > 0.01).map(([k, v]) =>
+    `<span class="${k === worst[0] ? 'hot' : ''}">${k} ${v.toFixed(1)}</span>`).join(' · ');
+  const warn = [];
+  if (d.capture_fps && d.capture_fps < 15) warn.push('camera/decode is short');
+  if (d.dropped_per_frame > 0.5) warn.push('loop behind the camera');
+  if (d.latency_ms > 300) warn.push('frames are stale');
+  if (d.viewers > 0 && d.stream_fps && d.process_fps &&
+      d.stream_fps < d.process_fps * 0.6) warn.push('viewer is behind, not the server');
+  if (lastCpu && lastCpu.saturated)
+    warn.push(`CPU saturated (${lastCpu.cores_used}/${lastCpu.cores_available} cores)` +
+              ' — this browser is competing with it');
+  const cpu = lastCpu
+    ? ` · <b>cpu</b> ${lastCpu.cores_used}/${lastCpu.cores_available} cores` : '';
+  return `
+    <div class="diag-row"><b>capture</b> ${d.capture_fps} fps ·
+      <b>processed</b> ${d.process_fps} fps ·
+      <b>streamed</b> ${d.viewers ? d.stream_fps + ' fps' : '—'}${cpu}</div>
+    <div class="diag-row">dropped ${d.dropped_per_frame}/frame ·
+      latency ${d.latency_ms} ms · frame ${d.frame_ms} ms ·
+      rec ${d.recognitions_per_frame}/frame</div>
+    <div class="diag-row">${bar}</div>
+    ${warn.length ? `<div class="diag-row warnrow">${warn.join(' · ')}</div>` : ''}`;
+}
+
 async function loadCameras() {
   const data = await (await fetch('/api/cameras')).json();
+  lastCpu = data.cpu || null;
   renderPause(data.paused);
   const grid = $('#grid');
   for (const c of data.cameras) {
@@ -154,13 +226,15 @@ async function loadCameras() {
         <header><span class="dot"></span><strong>Camera ${c.id}</strong>
         <div class="controls">
           <span class="fps" title="Frames per second actually processed"></span>
+          <button class="toggle diag-btn" title="Show where the time goes">i</button>
           <span class="badge">ENROLLING</span>
           <span class="badge spoof-badge">SPOOF?</span>
           <button class="toggle shot" title="Take an attendance photo">PHOTO</button>
           <button class="toggle rec" title="Recognition on/off">REC</button>
           <button class="toggle power" title="Camera on/off">ON</button>
         </div></header>
-        <img src="/stream/${c.id}" alt="Camera ${c.id}">`;
+        <img src="/stream/${c.id}" alt="Camera ${c.id}">
+        <div class="diag"></div>`;
       grid.appendChild(card);
     }
     card.querySelector('.dot').classList.toggle('on', c.connected);
@@ -175,6 +249,15 @@ async function loadCameras() {
     rec.classList.toggle('on', c.recognition);
     rec.onclick = () => patchCam(c.id, { recognition: !c.recognition });
     card.querySelector('.spoof-badge').style.display = c.spoof ? 'inline-block' : 'none';
+    const diagBtn = card.querySelector('.diag-btn');
+    const diagBox = card.querySelector('.diag');
+    diagBtn.classList.toggle('on', showDiag.has(c.id));
+    diagBtn.onclick = () => {
+      showDiag.has(c.id) ? showDiag.delete(c.id) : showDiag.add(c.id);
+      loadCameras();
+    };
+    diagBox.style.display = showDiag.has(c.id) ? 'block' : 'none';
+    if (showDiag.has(c.id) && c.diag) diagBox.innerHTML = renderDiag(c.diag);
     const shot = card.querySelector('.shot');
     const canShoot = c.enabled && c.connected && c.recognition && !data.paused;
     shot.disabled = !canShoot || c.spoof;
@@ -265,6 +348,74 @@ async function delPerson(name) {
   loadPeople();
 }
 
+// --- enrollment ring -------------------------------------------------------
+// 48 ticks around an ellipse, split into three arcs that map onto the real pose
+// bins. Left/right are the outer arcs, centre the top span. A tick lights when
+// its arc's captured count reaches it, so the dial always agrees with the
+// numeric counts beside it.
+const RING = { ticks: 48, cx: 130, cy: 130, rx: 108, ry: 108, inner: 96 };
+// Arc spans in degrees around the dial, 0 = top, positive = clockwise.
+// The pose names are the PERSON'S own left/right, and the video is not mirrored,
+// so their left appears on the viewer's right. The arcs are placed to match where
+// the marker actually travels — otherwise the arc would fill on the opposite side
+// from the moving dot.
+const ARCS = { right: [-105, -35], center: [-25, 25], left: [35, 105] };
+// how far the head can turn before the marker pins to the edge of the dial
+const AIM_RANGE = { yaw: 40, pitch: 22 };
+
+function buildRing() {
+  const g = document.getElementById('ticks');
+  if (g.childElementCount) return;               // built once, like the cam cards
+  for (let i = 0; i < RING.ticks; i++) {
+    const deg = -180 + (360 * i) / RING.ticks;
+    const rad = (deg - 90) * Math.PI / 180;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', RING.cx + RING.inner * Math.cos(rad));
+    line.setAttribute('y1', RING.cy + RING.inner * Math.sin(rad));
+    line.setAttribute('x2', RING.cx + RING.rx * Math.cos(rad));
+    line.setAttribute('y2', RING.cy + RING.ry * Math.sin(rad));
+    line.dataset.deg = deg;
+    g.appendChild(line);
+  }
+}
+
+let aimEma = null;    // pose jitters +/-3-5 deg; smooth it or the marker shakes
+function renderRing(s) {
+  buildRing();
+  const needed = s.needed || 1;
+  const ticks = [...document.getElementById('ticks').children];
+  for (const line of ticks) {
+    const deg = parseFloat(line.dataset.deg);
+    let lit = false, active = false;
+    for (const [pose, [from, to]] of Object.entries(ARCS)) {
+      if (deg < from || deg > to) continue;
+      const done = (s.counts && s.counts[pose]) || 0;
+      // fraction of this arc lit == fraction of that pose's samples captured
+      lit = (deg - from) / (to - from) < done / needed;
+      active = pose === s.pose;
+    }
+    line.classList.toggle('lit', lit);
+    line.classList.toggle('active', active && !lit);
+  }
+
+  const aim = document.getElementById('aim');
+  if (s.yaw == null || s.pitch == null) {
+    aim.classList.remove('on');
+    aimEma = null;
+    return;
+  }
+  const target = { yaw: s.yaw, pitch: s.pitch };
+  aimEma = aimEma
+    ? { yaw: aimEma.yaw + 0.35 * (target.yaw - aimEma.yaw),
+        pitch: aimEma.pitch + 0.35 * (target.pitch - aimEma.pitch) }
+    : target;
+  const clamp = (v, m) => Math.max(-1, Math.min(1, v / m));
+  // image is not mirrored, so the person's own left appears on the viewer's right
+  aim.setAttribute('cx', RING.cx + clamp(aimEma.yaw, AIM_RANGE.yaw) * RING.inner);
+  aim.setAttribute('cy', RING.cy - clamp(aimEma.pitch, AIM_RANGE.pitch) * RING.inner);
+  aim.classList.add('on');
+}
+
 async function startEnroll() {
   const name = $('#name').value.trim();
   if (!name) { alert('Enter a name first'); return; }
@@ -293,15 +444,27 @@ async function pollEnroll() {
     $('#instruction').textContent = s.instruction || '';
     $('#problem').textContent = s.problem || '';
     $('#warning').textContent = s.warning ? s.warning + ' — continuing anyway.' : '';
+    const video = $('#enroll-video');
+    const src = '/stream/' + s.camera;
+    if (!video.getAttribute('src') || !video.getAttribute('src').endsWith(src)) {
+      video.src = src;                      // only reassign on a camera change
+      video.alt = `Camera ${s.camera}`;
+    }
     for (const [pose, n] of Object.entries(s.counts)) {
       const row = document.getElementById('pose-' + pose);
       if (!row) continue;
-      row.querySelector('.bar i').style.width = (100 * n / s.needed) + '%';
       row.querySelector('.count').textContent = `${n}/${s.needed}`;
+      row.classList.toggle('done', n >= s.needed);
+      row.classList.toggle('active', pose === s.pose);
     }
+    renderRing(s);
   }
   $('#message').textContent = (!active && s.state !== 'idle') ? (s.message || '') : '';
-  if (wasActive && !active) { loadPeople(); loadCameras(); $('#name').value = ''; }
+  if (wasActive && !active) {
+    loadPeople(); loadCameras(); $('#name').value = '';
+    $('#enroll-video').removeAttribute('src');   // stop pulling the MJPEG
+    aimEma = null;
+  }
   wasActive = active;
 }
 

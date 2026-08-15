@@ -40,6 +40,9 @@ DEFAULTS = {
         # 0 = auto-detect physical cores. Raising this past the physical core
         # count measured no faster; see src/runtime.py.
         "threads": 0,
+        # Let ORT threads spin while idle. False is right for this camera-paced
+        # workload — same fps, a third less CPU. See session_options().
+        "spin_wait": False,
     },
     "cameras": {
         # Device indices (ints) or RTSP/HTTP URLs (strings), mixed freely.

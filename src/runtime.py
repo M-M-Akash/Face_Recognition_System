@@ -31,6 +31,8 @@ from src.config import config
 
 logger = logging.getLogger(__name__)
 
+_warned_oversubscribed = False
+
 
 def physical_cores():
     """Physical cores, not hyperthreads. Falls back to the logical count."""
@@ -59,10 +61,26 @@ def physical_cores():
 
 def thread_budget():
     """Intra-op threads per session. `runtime.threads` in config.toml (or the
-    ORT_THREADS env var) wins; 0 means auto = physical cores."""
+    ORT_THREADS env var) wins; 0 means auto = physical cores.
+
+    Warns rather than clamps when the configured value exceeds physical cores:
+    with the spin-wait off it is merely a little wasteful, and silently
+    overriding an explicit setting is worse than saying it is unwise.
+    """
+    global _warned_oversubscribed
     configured = config.runtime.threads
     if configured and int(configured) > 0:
-        return int(configured)
+        n, physical = int(configured), physical_cores()
+        # once, not per session and certainly not per /api/diagnostics call
+        if n > physical and not _warned_oversubscribed:
+            _warned_oversubscribed = True
+            logger.warning(
+                f"[runtime] threads = {n} exceeds the {physical} PHYSICAL cores on "
+                f"this machine. Hyperthreads add no compute for these models, so "
+                f"this costs CPU without adding throughput — and CPU spent here is "
+                f"taken from whatever renders your dashboard. Prefer threads = 0 "
+                f"(auto) or {physical}.")
+        return n
     return physical_cores()
 
 
@@ -74,13 +92,26 @@ def session_options(threads=None):
     # so an inter-op pool would only add threads to contend with the intra-op one.
     so.inter_op_num_threads = 1
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    # Deliberately NOT disabling session.intra_op.allow_spinning. Turning the
-    # spin-wait off looks right — idle ORT threads stop holding cores while the
-    # loop grabs frames and encodes JPEGs — but measured at this thread budget it
-    # is a straight loss: tools/bench_pipeline.py puts the recogniser at 6.7 ms
-    # spinning against 9.3 ms not, and the detector 16.2 ms against 18.2 ms. The
-    # per-op wake-up cost on these many-layered graphs outweighs the contention
-    # it saves. Re-measure before changing it.
+    # Spin-wait OFF by default, and the reason matters because the obvious
+    # benchmark says the opposite.
+    #
+    # tools/bench_pipeline.py hammers inference back-to-back with no idle time,
+    # and in THAT regime spinning wins (recogniser 6.7 ms against 9.3 ms). But
+    # this application is camera-paced: it runs one detection then waits ~10 ms
+    # for the next frame, and idle ORT threads spin straight through that gap
+    # burning cores. Measured in THAT regime — a fixed 30 fps, which is what
+    # actually runs — spinning cost 1.55 cores against 1.06 with it off, at
+    # identical frame rate and identical per-detection latency.
+    #
+    # That CPU matters because the dashboard's browser usually shares the
+    # machine: with 4 sessions spinning, the container took 353% of 400% and
+    # starved the browser of the cycles it needed to decode the MJPEG stream,
+    # which looks exactly like a dead server.
+    #
+    # So: bench_pipeline WILL report worse per-inference latency with this off.
+    # That is expected, not a regression. Do not "fix" it from that number alone.
+    if not config.runtime.spin_wait:
+        so.add_session_config_entry("session.intra_op.allow_spinning", "0")
     return so
 
 
@@ -113,5 +144,13 @@ def insightface_session_options(threads=None):
 
 
 def configure_opencv(threads=None):
-    """OpenCV keeps its own pool for imencode/resize/cvtColor — same budget."""
+    """OpenCV keeps its own pool for imencode/resize/cvtColor — same budget.
+
+    This does NOT affect camera capture rate, which is the natural thing to
+    assume since VideoCapture.read() performs the YUYV->BGR conversion and that
+    is an OpenCV op. It is simply far too small to matter: cvtColor measures
+    0.08 ms and imencode 0.63 ms, against the ~60 ms a camera spends per frame
+    in dim light. Raw capture measured an identical 16.7 fps at 1, 2, 4 and auto
+    threads, with zero spread. Capture rate is set by exposure time, not here.
+    """
     cv2.setNumThreads(threads or thread_budget())
